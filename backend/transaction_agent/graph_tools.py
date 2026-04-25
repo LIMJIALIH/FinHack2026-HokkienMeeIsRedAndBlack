@@ -126,8 +126,9 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
 
             cypher = (
                 "MATCH (u:User) "
-                "WHERE toLower(u.`~id`) CONTAINS toLower($q) "
-                "RETURN u.`~id` AS graph_id "
+                "WHERE toLower(coalesce(u.name, '')) CONTAINS toLower($q) "
+                "OR toLower(u.`~id`) CONTAINS toLower($q) "
+                "RETURN u.`~id` AS graph_id, u.name AS display_name "
                 "LIMIT $limit"
             )
             params = json.dumps({"q": q, "limit": max(1, int(limit))})
@@ -137,7 +138,7 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
             for row in rows:
                 graph_id = str(row.get("graph_id", ""))
                 user_id = graph_id.split(":", 1)[1] if graph_id.startswith("user:") else graph_id
-                display_name = user_id.replace("_", " ").replace("-", " ").title()
+                display_name = str(row.get("display_name", "")).strip() or user_id.replace("_", " ").replace("-", " ").title()
                 contacts.append({"user_id": user_id, "graph_id": graph_id, "display_name": display_name})
             return {"query": query, "contacts": contacts}
         except Exception as exc:  # noqa: BLE001
@@ -372,6 +373,89 @@ def get_transfer_edges_info_tool(
         "fields": TRANSFER_EDGE_FIELDS,
         "edges": [],
         "source": "none",
+    }
+
+
+def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) -> dict[str, Any]:
+    """Fetch graph counts and recent User/TRANSFERRED_TO samples for grounding."""
+    settings = Settings()
+    safe_user_limit = max(1, min(int(user_limit), 20))
+    safe_edge_limit = max(1, min(int(edge_limit), 20))
+
+    if settings.use_mock_graph:
+        return {
+            "source": "mock",
+            "counts": {"users": 4, "transfers": 3},
+            "sample_users": [
+                {"graph_id": "user:marcus", "name": "Marcus", "risk_tier_current": "low"},
+                {"graph_id": "user:ali", "name": "Ali", "risk_tier_current": "low"},
+                {"graph_id": "user:investment_agent", "name": "Investment Agent", "risk_tier_current": "high"},
+                {"graph_id": "user:siti", "name": "Siti", "risk_tier_current": "medium"},
+            ][:safe_user_limit],
+            "sample_transfers": [
+                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 12.5, "currency": "MYR"},
+                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 2.0, "currency": "MYR"},
+                {"source_id": "user:marcus", "target_id": "user:investment_agent", "amount": 1000.0, "currency": "MYR"},
+            ][:safe_edge_limit],
+        }
+
+    if settings.neptune_endpoint:
+        try:
+            client = _neptune_data_client(settings)
+
+            users_count_response = client.execute_open_cypher_query(
+                openCypherQuery="MATCH (u:User) RETURN count(u) AS user_count",
+            )
+            edges_count_response = client.execute_open_cypher_query(
+                openCypherQuery="MATCH ()-[t:TRANSFERRED_TO]->() RETURN count(t) AS transfer_count",
+            )
+            users_response = client.execute_open_cypher_query(
+                openCypherQuery=(
+                    "MATCH (u:User) "
+                    "RETURN u.`~id` AS graph_id, u.name AS name, u.risk_tier_current AS risk_tier_current "
+                    "ORDER BY coalesce(u.updated_at, 0) DESC "
+                    "LIMIT $limit"
+                ),
+                parameters=json.dumps({"limit": safe_user_limit}),
+            )
+            edges_response = client.execute_open_cypher_query(
+                openCypherQuery=(
+                    "MATCH (s:User)-[t:TRANSFERRED_TO]->(r:User) "
+                    "RETURN s.`~id` AS source_id, r.`~id` AS target_id, t.amount AS amount, t.currency AS currency, "
+                    "t.tx_time AS tx_time, t.risk_score_latest AS risk_score_latest "
+                    "ORDER BY coalesce(t.updated_at, 0) DESC "
+                    "LIMIT $limit"
+                ),
+                parameters=json.dumps({"limit": safe_edge_limit}),
+            )
+
+            user_count = 0
+            transfer_count = 0
+            if users_count_response.get("results"):
+                user_count = int(users_count_response["results"][0].get("user_count", 0))
+            if edges_count_response.get("results"):
+                transfer_count = int(edges_count_response["results"][0].get("transfer_count", 0))
+
+            return {
+                "source": "neptune",
+                "counts": {"users": user_count, "transfers": transfer_count},
+                "sample_users": users_response.get("results", []),
+                "sample_transfers": edges_response.get("results", []),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "source": "neptune",
+                "counts": {"users": 0, "transfers": 0},
+                "sample_users": [],
+                "sample_transfers": [],
+                "error": f"neptune_overview_failed: {exc}",
+            }
+
+    return {
+        "source": "none",
+        "counts": {"users": 0, "transfers": 0},
+        "sample_users": [],
+        "sample_transfers": [],
     }
 
 

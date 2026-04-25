@@ -55,6 +55,7 @@ type VoiceTurnResponse = {
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+const VOICE_USER_ID = process.env.NEXT_PUBLIC_VOICE_USER_ID ?? "marcus"
 
 async function readVoiceStream(
   body: ReadableStream<Uint8Array>,
@@ -188,6 +189,7 @@ export function WalletView({
         body: JSON.stringify({
           user_text: prompt,
           thread_id: activeThreadId,
+          user_id: VOICE_USER_ID,
         }),
       })
       if (!response.ok) {

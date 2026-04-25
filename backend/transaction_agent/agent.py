@@ -6,10 +6,12 @@ from typing import Any, Literal
 
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 from transaction_agent.graph_tools import (
     get_transfer_edges_info_tool,
+    get_neptune_graph_overview_tool,
     get_user_node_info_tool,
     search_contact_nodes_tool,
 )
@@ -37,6 +39,7 @@ class LLMTransferDecision(BaseModel):
 class PendingDecision:
     warning_id: str
     decision: str
+    user_id: str
     transfer: dict[str, Any] = field(default_factory=dict)
 
 
@@ -64,6 +67,34 @@ def _set_provider_api_key(model_provider: str, api_key: str | None) -> None:
 
 def _default_user_id() -> str:
     return os.getenv("VOICE_AGENT_DEFAULT_USER_ID", "marcus")
+
+
+def _resolve_user_id(user_id: str | None) -> str:
+    value = (user_id or "").strip()
+    return value or _default_user_id()
+
+
+def _build_turn_payload(text: str, user_id: str) -> dict[str, Any]:
+    # Inject sender context so sender-side checks are explicit.
+    content = f"sender_user_id={user_id}\nuser_request={text}"
+    return {"messages": [{"role": "user", "content": content}]}
+
+
+def _resolve_recursion_limit() -> int:
+    raw = (os.getenv("MAIN_AGENT_RECURSION_LIMIT", "60") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 60
+    return max(10, min(value, 500))
+
+
+def _runtime_config(thread_id: str) -> dict[str, Any]:
+    return {
+        "configurable": {"thread_id": thread_id},
+        # Standalone key per LangGraph docs (not nested under "configurable").
+        "recursion_limit": _resolve_recursion_limit(),
+    }
 
 
 def _error_payload(thread_id: str, message: str) -> dict[str, Any]:
@@ -118,6 +149,7 @@ def _summarize_tool_name(name: str) -> str:
         "search_contact_nodes_tool": "Finding matching contacts",
         "get_user_node_info_tool": "Checking user node details",
         "get_transfer_edges_info_tool": "Checking transfer edge history",
+        "get_neptune_graph_overview_tool": "Checking graph overview",
     }.get(name, f"Running {name}")
 
 
@@ -164,6 +196,7 @@ def _response_from_agent_decision(
     steps: list[str],
     source_text: str,
     thread_id: str,
+    user_id: str,
 ) -> dict[str, Any]:
     if agent_decision.mode != "transfer_decision":
         return {
@@ -193,7 +226,7 @@ def _response_from_agent_decision(
 
     try:
         risk_result = submit_llm_transfer_decision_tool(
-            user_id=_default_user_id(),
+            user_id=user_id,
             recipient_id=agent_decision.recipient_id,
             amount=float(agent_decision.amount),
             message=agent_decision.message or source_text,
@@ -210,11 +243,17 @@ def _response_from_agent_decision(
 
     persisted_decision = str(risk_result.get("decision", "WARNING"))
     warning_id = risk_result.get("warning_id")
-    if persisted_decision in {"WARNING", "INTERVENTION_REQUIRED"} and isinstance(warning_id, str):
+    if persisted_decision in {"WARNING", "INTERVENTION_REQUIRED"}:
+        if not isinstance(warning_id, str) or not warning_id.strip():
+            return _error_payload(
+                thread_id,
+                "Transfer flagged as risky but warning tracking id is missing. Transfer was not finalized.",
+            )
         risk_result["purpose_question"] = agent_decision.purpose_question
         agent.pending_by_thread[thread_id] = PendingDecision(
             warning_id=warning_id,
             decision=persisted_decision,
+            user_id=user_id,
             transfer={
                 "recipient_id": agent_decision.recipient_id,
                 "amount": agent_decision.amount,
@@ -275,6 +314,7 @@ def build_main_deep_agent(
             search_contact_nodes_tool,
             get_user_node_info_tool,
             get_transfer_edges_info_tool,
+            get_neptune_graph_overview_tool,
         ],
         response_format=LLMTransferDecision,
         checkpointer=MemorySaver(),
@@ -288,10 +328,13 @@ def build_main_deep_agent(
             "(:User)-[:TRANSFERRED_TO]->(:User) with fields ~id, tx_time, amount, currency, "
             "message_text, tx_note, channel, status, finbert_score, emotion_score, risk_score_latest, "
             "risk_reason_codes, updated_at. "
+            "Each user turn includes sender_user_id in the message. Always use sender_user_id for sender checks "
+            "and as source_user_id for transfer edge history checks. "
             "For any transfer request, extract recipient, amount, currency, and message/purpose. "
             "Call search_contact_nodes_tool when the recipient is named or ambiguous. "
             "Call get_user_node_info_tool for the sender and recipient before deciding. "
             "Call get_transfer_edges_info_tool for sender-to-recipient edge history before deciding. "
+            "Call get_neptune_graph_overview_tool when broader graph context is needed. "
             "If you cannot identify a transfer or required details are missing, return mode='message' "
             "with a concise assistant_text asking only for the missing information. "
             "If the transfer is clear, return mode='transfer_decision', recipient_id, amount, currency, "
@@ -306,18 +349,29 @@ def build_main_deep_agent(
     return MainAgentRuntime(agent=deep_agent)
 
 
-def run_main_turn(agent: MainAgentRuntime, text: str, thread_id: str | None = None) -> dict[str, Any]:
+def run_main_turn(
+    agent: MainAgentRuntime,
+    text: str,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
     resolved_thread_id = thread_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": resolved_thread_id}}
+    resolved_user_id = _resolve_user_id(user_id)
+    config = _runtime_config(resolved_thread_id)
 
     try:
         llm_result = agent.agent.invoke(
-            {"messages": [{"role": "user", "content": text}]},
+            _build_turn_payload(text=text, user_id=resolved_user_id),
             config=config,
             version="v2",
         )
         agent_decision = _decision_from_result(llm_result)
         steps = _collect_action_steps(llm_result)
+    except GraphRecursionError:
+        return _error_payload(
+            resolved_thread_id,
+            "Request took too many reasoning steps. Please rephrase with transfer details (recipient and amount).",
+        )
     except Exception as exc:  # noqa: BLE001
         return _error_payload(resolved_thread_id, f"Unable to parse transfer intent: {exc}")
 
@@ -327,6 +381,7 @@ def run_main_turn(agent: MainAgentRuntime, text: str, thread_id: str | None = No
         steps=steps,
         source_text=text,
         thread_id=resolved_thread_id,
+        user_id=resolved_user_id,
     )
 
 
@@ -334,9 +389,11 @@ def run_main_turn_stream_events(
     agent: MainAgentRuntime,
     text: str,
     thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     resolved_thread_id = thread_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": resolved_thread_id}}
+    resolved_user_id = _resolve_user_id(user_id)
+    config = _runtime_config(resolved_thread_id)
     llm_result: dict[str, Any] = {}
     steps: list[str] = []
 
@@ -352,7 +409,7 @@ def run_main_turn_stream_events(
 
     try:
         for chunk in agent.agent.stream(
-            {"messages": [{"role": "user", "content": text}]},
+            _build_turn_payload(text=text, user_id=resolved_user_id),
             config=config,
             stream_mode=["updates", "custom"],
             subgraphs=True,
@@ -397,6 +454,12 @@ def run_main_turn_stream_events(
             steps=steps,
             source_text=text,
             thread_id=resolved_thread_id,
+            user_id=resolved_user_id,
+        )
+    except GraphRecursionError:
+        result = _error_payload(
+            resolved_thread_id,
+            "Request took too many reasoning steps. Please rephrase with transfer details (recipient and amount).",
         )
     except Exception as exc:  # noqa: BLE001
         result = _error_payload(resolved_thread_id, f"Unable to parse transfer intent: {exc}")

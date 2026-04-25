@@ -53,6 +53,7 @@ def voice_turn(payload: VoiceTurnRequest, main_agent: Any = Depends(get_main_age
             agent=agent,
             text=payload.user_text,
             thread_id=payload.thread_id,
+            user_id=payload.user_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"voice_turn_failed: {exc}") from exc
@@ -69,6 +70,7 @@ def voice_turn_stream(payload: VoiceTurnRequest, main_agent: Any = Depends(get_m
                 agent=agent,
                 text=payload.user_text,
                 thread_id=payload.thread_id,
+                user_id=payload.user_id,
             ):
                 if event.get("event") == "final":
                     raw_payload = event.get("payload", {})
