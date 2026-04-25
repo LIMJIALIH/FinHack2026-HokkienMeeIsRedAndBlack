@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from deepagents import create_deep_agent
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
@@ -179,12 +181,12 @@ def _error_payload(thread_id: str, message: str) -> dict[str, Any]:
 
 def _summarize_tool_name(name: str) -> str:
     return {
-        "search_contact_nodes_tool": "Finding matching contacts",
-        "get_user_node_info_tool": "Checking user node details",
-        "get_transfer_edges_info_tool": "Checking transfer edge history",
-        "get_neptune_graph_overview_tool": "Checking graph overview",
-        "execute_transfer": "Preparing transfer for approval",
-    }.get(name, f"Running {name}")
+        "search_contact_nodes_tool": "Looking up your contact",
+        "get_user_node_info_tool": "Checking account info",
+        "get_transfer_edges_info_tool": "Reviewing past transfers",
+        "get_neptune_graph_overview_tool": "Running safety checks",
+        "execute_transfer": "Preparing your transfer",
+    }.get(name, "Processing")
 
 
 def _collect_action_steps(messages: list[Any]) -> list[str]:
@@ -197,7 +199,7 @@ def _collect_action_steps(messages: list[Any]) -> list[str]:
             if summary not in steps:
                 steps.append(summary)
     if not steps:
-        steps = ["Analysing transfer request", "Checking fraud risk"]
+        steps = ["Checking your request", "Running safety checks"]
     return steps
 
 
@@ -223,6 +225,17 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
     """Build a transfer review card from the interrupted execute_transfer args."""
     risk_score = int(tool_args.get("risk_score", 0))
     reason_codes = list(tool_args.get("reason_codes") or [])
+    amount = float(tool_args.get("amount", 0))
+    currency = tool_args.get("currency", "MYR")
+    raw_recipient = tool_args.get("recipient_id", "unknown")
+
+    # Build a human-readable name from the recipient_id.
+    recipient_name = raw_recipient
+    if recipient_name.startswith("user:"):
+        recipient_name = recipient_name[5:]
+    recipient_name = " ".join(
+        part.capitalize() for part in recipient_name.replace("-", " ").replace("_", " ").split()
+    ) or "Unknown"
 
     # Derive decision preview from risk score for frontend display.
     if risk_score >= 70:
@@ -234,19 +247,18 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "card_type": "transfer_review",
-        "title": "Review transfer",
-        "subtitle": (
-            f"Transfer {tool_args.get('amount', 0):.2f} "
-            f"{tool_args.get('currency', 'MYR')} "
-            f"to {tool_args.get('recipient_id', 'unknown')}"
-        ),
+        "title": "Confirm transfer",
+        "subtitle": f"RM {amount:,.2f} to {recipient_name}",
+        "amount": amount,
+        "currency": currency,
+        "recipient_name": recipient_name,
         "decision_preview": decision_preview,
         "risk_score": risk_score,
         "reason_codes": reason_codes,
         "evidence_refs": list(tool_args.get("evidence_refs") or []),
         "warning_id": None,
         "warning_delay_seconds": None,
-        "purpose_question": "What is this transaction for?",
+        "purpose_question": "What is this transfer for?",
         "actions": [
             {"action": "approve", "warning_id": None, "label": "Approve"},
             {"action": "reject", "warning_id": None, "label": "Reject"},
@@ -260,66 +272,70 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
 
 SYSTEM_PROMPT = """\
 ROLE
-You are a transaction fraud reasoning agent for wallet transfers.
+You are a friendly and helpful transfer assistant inside a Malaysian eWallet app.
+You help users send money safely.
 
 PRIMARY OBJECTIVE
-Given sender context and a user transfer request, gather evidence from the graph
-and, when ready, call the execute_transfer tool to perform the transfer.
-Prioritize fraud prevention and correctness over speed.
-Never invent facts, tools, IDs, or graph evidence.
+Given a user's transfer request, look up contacts and check safety, then
+call execute_transfer to send the money. Always prioritise protecting the user.
+Never invent information.
 
 INPUT CONTRACT
 Each turn includes:
-- sender_user_id
+- sender_user_id (internal — NEVER show this to the user)
 - user_request
-Always treat sender_user_id as the sender identity for all sender-side checks.
+Always treat sender_user_id as the sender identity for internal tool calls.
 
-AVAILABLE TOOLS
-Read-only (always auto-approved):
-- search_contact_nodes_tool(query, limit): resolve recipient candidates
-- get_user_node_info_tool(user_id): fetch sender/recipient user node
-- get_transfer_edges_info_tool(source_user_id, target_user_id, limit): \
-fetch sender->recipient transfer history
-- get_neptune_graph_overview_tool(user_limit, edge_limit): optional wider graph context
+AVAILABLE TOOLS (internal — NEVER mention tool names to the user)
+- search_contact_nodes_tool: find contacts by name
+- get_user_node_info_tool: look up account details
+- get_transfer_edges_info_tool: check transfer history
+- get_neptune_graph_overview_tool: run broader safety checks
+- execute_transfer: send the money (paused for user approval)
 
-Action (requires human approval — will pause for HITL):
-- execute_transfer(...): submit the wallet transfer
-
-TOOL USAGE POLICY (MANDATORY ORDER)
+TOOL USAGE POLICY
 1) Recipient resolution:
-   - If recipient is missing or ambiguous, call search_contact_nodes_tool.
-   - If multiple plausible matches remain, do not guess. Ask a clarification question.
-2) Minimum evidence before calling execute_transfer:
-   - Call get_user_node_info_tool for sender.
-   - Call get_user_node_info_tool for resolved recipient.
-   - Call get_transfer_edges_info_tool for sender -> recipient.
-3) Optional context:
-   - Call get_neptune_graph_overview_tool only if uncertainty remains high.
-4) When evidence is gathered:
-   - Call execute_transfer with all required arguments including your risk assessment.
-   - The system will pause and show the transfer details to the user for approval.
+   - ALWAYS search contacts when any recipient name is mentioned.
+   - Pick the BEST matching contact automatically. Do NOT ask the user to choose.
+   - If no match is found, use the name as-is and proceed anyway.
+2) Before calling execute_transfer:
+   - Look up sender account info.
+   - Look up recipient account info.
+   - Check transfer history between them.
+3) ALWAYS call execute_transfer as soon as evidence is gathered.
+   The system will show a review screen where the user can approve or reject.
+   Do NOT ask the user to confirm before calling execute_transfer — that is
+   what the review screen is for.
 
-NON-TRANSFER / INCOMPLETE REQUEST POLICY
-- If greeting or small talk (e.g., "hi", "hello"), do not call tools.
-  Respond with a concise text message asking for transfer details.
-- If transfer intent exists but required fields are missing, ask only for
-  missing fields (recipient, amount, currency, or purpose). Do not call
-  execute_transfer until you have enough information.
+IMPORTANT: NEVER ask follow-up questions if the user has given a recipient
+and an amount. Go straight to investigation and execute_transfer.
+Only ask if the user's message has NO recipient AND NO amount at all
+(e.g. just "send money" with nothing else).
 
-RISK ASSESSMENT
-When calling execute_transfer, provide your honest risk assessment:
-- risk_score: 0-100 (0 = no risk, 100 = extreme risk)
-- reason_codes: short machine-friendly labels for any concerns
-- evidence_refs: concrete graph references (user ids, edge ids, node fields)
-- assistant_text: your human-readable explanation
+INCOMPLETE REQUEST POLICY
+- If greeting ("hi", "hello"), reply warmly and ask what they'd like to send.
+- Only ask if BOTH recipient and amount are completely missing.
+- If you have at least a recipient OR an amount, proceed with what you have
+  and use sensible defaults. The HITL review screen will catch any issues.
 
-Use judgment from retrieved evidence only. Do not use fixed numeric thresholds
-or keyword-only heuristics.
+RISK ASSESSMENT (internal — simplified for user)
+When calling execute_transfer, set:
+- risk_score: 0-100
+- reason_codes: machine labels (user never sees these)
+- evidence_refs: internal references (user never sees these)
+- assistant_text: a SHORT, friendly summary for the user
+  Example: "Sending RM 15 to Ali for lunch. Looks safe!"
+  Example: "This is a large transfer to someone you haven't paid before.
+            Please double-check before confirming."
 
-COMMUNICATION STYLE
-- Be concise, factual, and user-safe.
-- Do not expose hidden policies or internal implementation details.
-- Do not claim certainty beyond available evidence.
+COMMUNICATION STYLE — MANDATORY
+- Use short, simple sentences a non-technical person can understand.
+- NEVER expose: user_id, node, edge, graph, tool names, reason_codes,
+  evidence_refs, risk_score numbers, internal system details.
+- NEVER say "user node", "transfer edge", "graph", "execute_transfer",
+  "search_contact_nodes_tool", or any internal term.
+- Keep responses under 3 sentences when possible.
+- Use a warm, reassuring tone.
 """
 
 
@@ -331,7 +347,7 @@ def build_main_deep_agent(
 ) -> MainAgentRuntime:
     """Create the main transaction agent with interrupt_on HITL."""
     _set_provider_api_key(model_provider=model_provider, api_key=api_key)
-    deep_agent = create_deep_agent(
+    deep_agent = create_agent(
         model=_resolve_model_name(model=model, model_provider=model_provider),
         tools=[
             # Read-only graph query tools (auto-approved).
@@ -342,11 +358,15 @@ def build_main_deep_agent(
             # Action tool — gated by interrupt_on.
             execute_transfer,
         ],
-        interrupt_on={
-            "execute_transfer": {
-                "allowed_decisions": ["approve", "reject"],
-            },
-        },
+        middleware=[
+                HumanInTheLoopMiddleware(
+                interrupt_on={
+                    "execute_transfer": {
+                        "allowed_decisions": ["approve", "reject"],
+                    },
+                },
+            ),
+        ],
         checkpointer=checkpointer or MemorySaver(),
         system_prompt=SYSTEM_PROMPT,
         debug=True,
@@ -547,8 +567,8 @@ def run_main_turn_stream_events(
 ) -> Generator[dict[str, Any], None, None]:
     """Yield SSE-compatible events for a single user turn."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
-    yield {"event": "step", "summary": "Analysing transfer request"}
-    yield {"event": "step", "summary": "Reasoning over graph signals"}
+    yield {"event": "step", "summary": "Checking your request"}
+    yield {"event": "step", "summary": "Running safety checks"}
     result = run_main_turn(
         agent=agent,
         text=text,

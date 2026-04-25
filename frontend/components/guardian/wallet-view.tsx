@@ -434,7 +434,7 @@ function SimulationPanel({
           </div>
         </div>
 
-        {latestAgentText && (
+        {latestAgentText && !reviewCard && (
           <div className="mt-5 rounded-md border border-border bg-secondary px-3 py-2.5">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Guardian</p>
             <p className="mt-1 text-sm leading-relaxed text-foreground">{latestAgentText}</p>
