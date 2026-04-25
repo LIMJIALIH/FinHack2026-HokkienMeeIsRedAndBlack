@@ -23,7 +23,12 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
   const [loadingGraph, setLoadingGraph] = useState<boolean>(true)
 
   const backendUrl = useMemo(
-    () => (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8001").replace(/\/+$/, ""),
+    () =>
+      (
+        process.env.NEXT_PUBLIC_API_BASE_URL ??
+        process.env.NEXT_PUBLIC_BACKEND_URL ??
+        "http://127.0.0.1:8000"
+      ).replace(/\/+$/, ""),
     [],
   )
 
@@ -35,7 +40,9 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
       setGraphError(null)
 
       try {
-        const response = await fetch(`${backendUrl}/regulatory-dashboard/graph`, { cache: "no-store" })
+        const response = await fetch(`${backendUrl}/api/v1/regulatory-dashboard/graph`, {
+          cache: "no-store",
+        })
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`)
         }

@@ -7,27 +7,11 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException
 
-app = FastAPI(title="FinHack Backend")
-
-
-def _cors_origins() -> list[str]:
-    raw = os.getenv(
-        "CORS_ALLOW_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000",
-    )
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+router = APIRouter()
+DEFAULT_AWS_PROFILE = "finhack_IsbUsersPS-393886308397"
+DEFAULT_NEPTUNE_CLUSTER_ID = "db-neptune-2"
 
 
 def _graphson_decode(value: Any) -> Any:
@@ -141,22 +125,41 @@ def _layout_positions(node_ids: list[str]) -> dict[str, tuple[float, float]]:
     return positions
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/regulatory-dashboard/graph")
-def regulatory_dashboard_graph() -> dict[str, Any]:
-    endpoint = os.getenv(
-        "NEPTUNE_ENDPOINT",
-        "https://db-neptune-2.cluster-cjugq6yyw4j8.ap-southeast-1.neptune.amazonaws.com:8182",
-    )
+def _resolve_neptune_connection() -> tuple[Any, str, str]:
     region = os.getenv("AWS_REGION", "ap-southeast-1")
-    profile = os.getenv("NEPTUNE_AWS_PROFILE")
+    profile = os.getenv("AWS_PROFILE", DEFAULT_AWS_PROFILE)
+    cluster_id = os.getenv("NEPTUNE_CLUSTER_ID", DEFAULT_NEPTUNE_CLUSTER_ID)
+    session = boto3.Session(profile_name=profile, region_name=region)
 
-    session = boto3.Session(profile_name=profile, region_name=region) if profile else boto3.Session(region_name=region)
-    client = session.client("neptunedata", endpoint_url=endpoint)
+    endpoint = os.getenv("NEPTUNE_ENDPOINT", "").strip()
+    if not endpoint:
+        try:
+            neptune = session.client("neptune", region_name=region)
+            response = neptune.describe_db_clusters(DBClusterIdentifier=cluster_id)
+        except (ClientError, BotoCoreError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to resolve Neptune endpoint for cluster '{cluster_id}': {exc}",
+            ) from exc
+
+        clusters = response.get("DBClusters", [])
+        if not clusters:
+            raise HTTPException(status_code=502, detail=f"Neptune cluster '{cluster_id}' was not found")
+
+        cluster = clusters[0]
+        host = str(cluster.get("Endpoint", "")).strip()
+        port = cluster.get("Port", 8182)
+        if not host:
+            raise HTTPException(status_code=502, detail=f"Neptune cluster '{cluster_id}' has no endpoint")
+        endpoint = f"https://{host}:{port}"
+
+    client = session.client("neptunedata", region_name=region, endpoint_url=endpoint)
+    return client, endpoint, region
+
+
+@router.get("/regulatory-dashboard/graph")
+def regulatory_dashboard_graph() -> dict[str, Any]:
+    client, endpoint, region = _resolve_neptune_connection()
 
     try:
         vertices_response = client.execute_gremlin_query(gremlinQuery="g.V().elementMap()")
@@ -237,15 +240,3 @@ def regulatory_dashboard_graph() -> dict[str, Any]:
         "nodes": nodes,
         "edges": edges,
     }
-from app.main import app
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-    )
