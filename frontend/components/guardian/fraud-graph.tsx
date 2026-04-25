@@ -5,9 +5,9 @@ import { User, UserX } from "lucide-react"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-type NodeKind = "trusted" | "neutral" | "flagged"
+export type NodeKind = "trusted" | "neutral" | "flagged"
 
-type GraphNode = {
+export type GraphNode = {
   id: string
   label: string
   sublabel: string
@@ -16,7 +16,8 @@ type GraphNode = {
   kind: NodeKind
 }
 
-type GraphEdge = {
+export type GraphEdge = {
+  id?: string
   from: string
   to: string
   label: string

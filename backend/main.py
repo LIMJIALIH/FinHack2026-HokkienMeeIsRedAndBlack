@@ -79,6 +79,13 @@ app.add_middleware(
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
+# Mount feature-branch API routes (speech transcription, regulatory dashboard)
+try:
+    from app.api.router import api_router
+    app.include_router(api_router)
+except ImportError:
+    pass
+
 # ── DynamoDB ──────────────────────────────────────────────────────────────
 _dynamo_resource = None
 
@@ -704,4 +711,4 @@ def graph_users():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

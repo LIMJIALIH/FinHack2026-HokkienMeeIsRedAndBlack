@@ -5,14 +5,22 @@ description = "TNG Guardian Voice — FastAPI backend with Alibaba Cloud eKYC"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "boto3>=1.40.0",
     "fastapi[standard]>=0.136.1",
     "python-dotenv>=1.0.0",
     "pyjwt>=2.8.0",
     "passlib[argon2]>=1.7.4",
     "httpx>=0.27.0",
-    "boto3>=1.34.0",
     "requests>=2.31.0",
     "requests-aws4auth>=1.3.0",
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
+    "langchain-core>=0.3.79",
+    "langchain-google-genai>=4.2.1",
+    "pydantic-settings>=2.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
 ]
