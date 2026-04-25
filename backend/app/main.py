@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from transaction_message import build_main_deep_agent
+from transaction_agent import build_main_deep_agent
 from app.api.v1.router import api_router
 from app.core.config import Settings
 from app.services.risk_engine import MockGraphRiskClient, NeptuneRiskClient, RiskEngine, build_graph
@@ -12,8 +12,19 @@ from app.services.warnings import InMemoryWarningStore
 logger = logging.getLogger(__name__)
 
 
+class _GoogleToolCallTextWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            record.name == "google_genai.types"
+            and "non-text parts in the response" in message
+            and "function_call" in message
+        )
+
+
 def create_app() -> FastAPI:
     settings = Settings()
+    logging.getLogger("google_genai.types").addFilter(_GoogleToolCallTextWarningFilter())
 
     graph_client = None
     if settings.use_mock_graph:

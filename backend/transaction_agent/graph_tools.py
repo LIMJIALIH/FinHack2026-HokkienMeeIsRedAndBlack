@@ -13,6 +13,8 @@ from app.services.risk_engine import MockGraphRiskClient, NeptuneRiskClient, Ris
 
 USER_NODE_FIELDS = [
     "~id",
+    "name",
+    "balance",
     "ekyc_status",
     "ekyc_level",
     "hashed_phone",
@@ -154,6 +156,8 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
         mock_users = {
             "user:marcus": {
                 "~id": "user:marcus",
+                "name": "Marcus",
+                "balance": 2480.0,
                 "ekyc_status": "verified",
                 "ekyc_level": "full",
                 "hashed_phone": "hash:sender_phone",
@@ -167,6 +171,8 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
             },
             "user:ali": {
                 "~id": "user:ali",
+                "name": "Ali",
+                "balance": 360.0,
                 "ekyc_status": "verified",
                 "ekyc_level": "basic",
                 "hashed_phone": "hash:ali_phone",
@@ -180,6 +186,8 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
             },
             "user:investment_agent": {
                 "~id": "user:investment_agent",
+                "name": "Investment Agent",
+                "balance": 18420.0,
                 "ekyc_status": "unverified",
                 "ekyc_level": "none",
                 "hashed_phone": "hash:investment_phone",
@@ -193,6 +201,8 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
             },
             "user:siti": {
                 "~id": "user:siti",
+                "name": "Siti",
+                "balance": 920.0,
                 "ekyc_status": "verified",
                 "ekyc_level": "full",
                 "hashed_phone": "hash:siti_phone",

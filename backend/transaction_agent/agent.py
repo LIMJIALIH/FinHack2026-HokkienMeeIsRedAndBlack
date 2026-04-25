@@ -134,6 +134,30 @@ def _collect_action_steps(result: dict[str, Any]) -> list[str]:
     return steps
 
 
+def _stream_part(chunk: Any) -> tuple[str | None, dict[str, Any] | None]:
+    if isinstance(chunk, dict):
+        chunk_type = chunk.get("type")
+        data = chunk.get("data")
+        return (chunk_type if isinstance(chunk_type, str) else None, data if isinstance(data, dict) else None)
+
+    # Compatibility with pre-v2 tuple streams, or adapters that still return
+    # nested tuples despite version="v2".
+    if isinstance(chunk, tuple):
+        if len(chunk) == 2 and isinstance(chunk[0], str):
+            data = chunk[1]
+            return chunk[0], data if isinstance(data, dict) else None
+        if len(chunk) == 2 and isinstance(chunk[1], tuple):
+            nested = chunk[1]
+            if len(nested) == 2 and isinstance(nested[0], str):
+                data = nested[1]
+                return nested[0], data if isinstance(data, dict) else None
+        if len(chunk) == 3 and isinstance(chunk[1], str):
+            data = chunk[2]
+            return chunk[1], data if isinstance(data, dict) else None
+
+    return None, None
+
+
 def _response_from_agent_decision(
     agent: MainAgentRuntime,
     agent_decision: LLMTransferDecision,
@@ -258,8 +282,8 @@ def build_main_deep_agent(
             "You are an LLM-based transaction fraud reasoning agent for wallet transfers. "
             "Do not use fixed scoring rules, threshold formulas, or keyword heuristics. "
             "Use the available graph tools dynamically and base your decision on the evidence they return. "
-            "The graph schema is exactly: User node (:User) with fields ~id, ekyc_status, ekyc_level, "
-            "hashed_phone, hashed_ic, risk_tier_current, summary_text_latest, summary_updated_at, "
+            "The graph schema is exactly: User node (:User) with fields ~id, name, balance, "
+            "ekyc_status, ekyc_level, hashed_phone, hashed_ic, risk_tier_current, summary_text_latest, summary_updated_at, "
             "summary_agent_version, created_at, updated_at; and transaction edge "
             "(:User)-[:TRANSFERRED_TO]->(:User) with fields ~id, tx_time, amount, currency, "
             "message_text, tx_note, channel, status, finbert_score, emotion_score, risk_score_latest, "
@@ -334,8 +358,7 @@ def run_main_turn_stream_events(
             subgraphs=True,
             version="v2",
         ):
-            chunk_type = chunk.get("type")
-            data = chunk.get("data")
+            chunk_type, data = _stream_part(chunk)
             if chunk_type == "custom" and isinstance(data, dict):
                 detail = data.get("detail") or data.get("status")
                 if isinstance(detail, str):

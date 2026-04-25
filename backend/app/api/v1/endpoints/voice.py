@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from agent import resume_main_hitl, run_main_turn, run_main_turn_stream_events
+from transaction_agent import resume_main_hitl, run_main_turn, run_main_turn_stream_events
 from app.api.dependencies import get_main_agent
 from app.schemas.voice import VoiceDecisionRequest, VoiceTurnRequest, VoiceTurnResponse
 
