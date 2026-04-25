@@ -405,13 +405,13 @@ function SimulationPanel({
       />
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-foreground">Transfer Simulation</h2>
+          <h2 className="text-base font-semibold text-foreground">Send Money</h2>
           <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
-            Voice-first Preview
+            AI-Protected
           </span>
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Type a transfer request. The Deep Agent will inspect contacts, user nodes, and transfer edges before deciding.
+          Tell us who you want to pay and how much — we'll check everything is safe before sending.
         </p>
       </div>
 
@@ -422,21 +422,21 @@ function SimulationPanel({
             disabled
             variant="outline"
             className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md"
-            aria-label="Voice transfer input coming soon"
+            aria-label="Voice input coming soon"
           >
             <Mic className="h-10 w-10" aria-hidden="true" />
           </Button>
           <div className="space-y-1">
-            <p className="text-sm font-semibold text-foreground">Voice Transfer Input</p>
+            <p className="text-sm font-semibold text-foreground">Voice Input</p>
             <p className="text-xs text-muted-foreground">
-              Latest request is shown here only; chat history is intentionally not accumulated.
+              Voice transfer coming soon — type your request below for now.
             </p>
           </div>
         </div>
 
         {latestAgentText && (
           <div className="mt-5 rounded-md border border-border bg-secondary px-3 py-2.5">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Latest agent message</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Guardian</p>
             <p className="mt-1 text-sm leading-relaxed text-foreground">{latestAgentText}</p>
           </div>
         )}
@@ -462,9 +462,9 @@ function SimulationPanel({
             value={transferPrompt}
             onChange={(event) => setTransferPrompt(event.target.value)}
             disabled={isBusy}
-            placeholder='Type transfer request, e.g. "Send RM 15 to Ali for lunch"'
+            placeholder='e.g. "Send RM 15 to Ali for lunch"'
             className="h-10 md:flex-1"
-            aria-label="Transfer instruction input"
+            aria-label="Transfer request"
           />
           <Button type="submit" disabled={isBusy || !transferPrompt.trim()} className="h-10 px-5">
             {isBusy ? (
@@ -472,21 +472,28 @@ function SimulationPanel({
             ) : (
               <ShieldAlert className="h-4 w-4" aria-hidden="true" />
             )}
-            Send
+            {isBusy ? (agentStep ?? "Checking...") : "Send"}
           </Button>
         </form>
+
+        {/* Inline step indicator below input */}
+        {isBusy && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-2.5 flex items-center gap-2 px-1"
+            style={{ animation: "var(--animate-fade-in)" }}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-primary"
+              style={{ animation: "var(--animate-status-pulse)" }}
+              aria-hidden="true"
+            />
+            <p className="text-xs text-muted-foreground">{agentStep ?? "Checking your request..."}</p>
+          </div>
+        )}
       </div>
 
-      {isBusy && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="mt-5 flex items-center gap-3 rounded-md border border-border bg-secondary px-3 py-2.5"
-        >
-          <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
-          <p className="text-sm text-foreground">{agentStep ?? "Analysing transfer request"}</p>
-        </div>
-      )}
       {errorMessage && (
         <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {errorMessage}

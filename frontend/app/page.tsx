@@ -31,78 +31,8 @@ export type Transaction = {
 }
 
 const INITIAL_BALANCE = 250
-const INITIAL_TRANSACTIONS: Transaction[] = [
-  {
-    id: "tx-001",
-    recipient: "Siti Nurhaliza",
-    amount: 25,
-    currency: "MYR",
-    purpose: "Coffee",
-    date: "Yesterday, 14:22",
-    type: "sent",
-    status: "approved",
-    channel: "wallet_app",
-    risk_score: 5,
-    reason_codes: [],
-    decision: "APPROVED",
-  },
-  {
-    id: "tx-002",
-    recipient: "Salary — DBKL",
-    amount: 180,
-    currency: "MYR",
-    purpose: "Reimbursement",
-    date: "2 days ago, 09:14",
-    type: "received",
-    status: "approved",
-    channel: "payroll",
-    risk_score: 0,
-    reason_codes: [],
-    decision: "APPROVED",
-  },
-  {
-    id: "tx-003",
-    recipient: "KL Property Agent",
-    amount: 3500,
-    currency: "MYR",
-    purpose: "Deposit transfer",
-    date: "3 days ago, 11:07",
-    type: "sent",
-    status: "warned",
-    channel: "voice_agent",
-    risk_score: 52,
-    reason_codes: ["AMOUNT_ANOMALY_MEDIUM", "GRAPH_NO_PRIOR_TRANSFER"],
-    decision: "WARNING",
-  },
-  {
-    id: "tx-004",
-    recipient: "Investment Guru MY",
-    amount: 5000,
-    currency: "MYR",
-    purpose: "Guaranteed returns program",
-    date: "5 days ago, 16:43",
-    type: "sent",
-    status: "blocked",
-    channel: "voice_agent",
-    risk_score: 88,
-    reason_codes: ["FINBERT_NEGATIVE_HIGH", "GRAPH_HIGH_RISK_HISTORY", "AMOUNT_ANOMALY_MEDIUM"],
-    decision: "INTERVENTION_REQUIRED",
-  },
-  {
-    id: "tx-005",
-    recipient: "Grab Driver",
-    amount: 12,
-    currency: "MYR",
-    purpose: "Ride fare",
-    date: "6 days ago, 08:30",
-    type: "sent",
-    status: "approved",
-    channel: "wallet_app",
-    risk_score: 0,
-    reason_codes: [],
-    decision: "APPROVED",
-  },
-]
+const INITIAL_TRANSACTIONS: Transaction[] = []
+
 
 export default function Page() {
   const [view, setView] = useState<View>("wallet")
