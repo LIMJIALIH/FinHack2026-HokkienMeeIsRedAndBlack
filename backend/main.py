@@ -153,8 +153,10 @@ def regulatory_dashboard_graph() -> dict[str, Any]:
         "https://db-neptune-2.cluster-cjugq6yyw4j8.ap-southeast-1.neptune.amazonaws.com:8182",
     )
     region = os.getenv("AWS_REGION", "ap-southeast-1")
+    profile = os.getenv("NEPTUNE_AWS_PROFILE")
 
-    client = boto3.client("neptunedata", region_name=region, endpoint_url=endpoint)
+    session = boto3.Session(profile_name=profile, region_name=region) if profile else boto3.Session(region_name=region)
+    client = session.client("neptunedata", endpoint_url=endpoint)
 
     try:
         vertices_response = client.execute_gremlin_query(gremlinQuery="g.V().elementMap()")
