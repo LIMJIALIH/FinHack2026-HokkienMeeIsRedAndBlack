@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
+import React, { useEffect, useState, useRef } from "react"
 import { X, ArrowRight } from "lucide-react"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
@@ -22,11 +22,21 @@ type ApiNode = {
 }
 
 type ApiEdge = {
+  id: string
   from: string
   to: string
   amount: number
+  currency: string
   status: string
-  ts: string
+  tx_time: string
+  message_text: string
+  tx_note: string
+  channel: string
+  finbert_score: number | null
+  emotion_score: number | null
+  risk_score_latest: number | null
+  risk_reason_codes: string | null
+  updated_at: string
 }
 
 type GraphData = {
@@ -541,6 +551,21 @@ function DetailPanel({ sel, onClose }: { sel: Selected; onClose: () => void }) {
   const flagCls = e.flagged
     ? "text-rose-600 border-rose-200 bg-rose-50"
     : "text-slate-600 border-slate-200 bg-slate-50"
+  const amt = `${r.currency || "MYR"} ${Number(r.amount ?? 0).toFixed(2)}`
+
+  function fmtScore(v: number | null | undefined): string {
+    if (v == null) return "—"
+    return Number(v).toFixed(4)
+  }
+
+  function fmtCodes(v: string | null | undefined): string {
+    if (!v) return "—"
+    try {
+      const parsed = JSON.parse(v)
+      return Array.isArray(parsed) ? parsed.join(", ") : String(v)
+    } catch { return String(v) }
+  }
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -552,22 +577,51 @@ function DetailPanel({ sel, onClose }: { sel: Selected; onClose: () => void }) {
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div className="flex-1 px-4 py-3 flex flex-col gap-0.5">
+
+      <div className="flex-1 px-4 py-3 flex flex-col gap-0.5 overflow-y-auto">
+        {/* From → To */}
         <div className="flex items-center gap-1.5 bg-secondary rounded-lg px-2.5 py-2 mb-2 text-xs">
           <span className="font-medium text-foreground truncate">{fromNode?.label ?? r.from}</span>
           <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
           <span className="font-medium text-foreground truncate">{toNode?.label ?? r.to}</span>
         </div>
-        <Field label="Amount" value={`MYR ${Number(r.amount ?? 0).toFixed(2)}`} mono accent />
-        <Field label="Status" value={r.status || "—"} accent={r.status === "blocked" || r.status === "warned"} />
-        {r.ts && <Field label="Time" value={safeDate(r.ts, true)} />}
+
+        {/* Core transaction */}
+        <SectionLabel>Transaction</SectionLabel>
+        <Field label="Edge ID"  value={r.id || "—"} mono />
+        <Field label="Amount"   value={amt} mono accent />
+        <Field label="Status"   value={r.status || "—"} accent={r.status === "blocked" || r.status === "warned"} />
+        <Field label="Channel"  value={r.channel || "—"} />
+        <Field label="Tx Time"  value={r.tx_time ? safeDate(r.tx_time, true) : "—"} />
+        <Field label="Updated"  value={r.updated_at ? safeDate(r.updated_at, true) : "—"} />
+        {r.message_text && <Field label="Message" value={r.message_text} />}
+        {r.tx_note      && <Field label="Note"    value={r.tx_note} />}
+
+        {/* AI signals */}
+        <SectionLabel>AI Signals</SectionLabel>
+        <Field label="FinBERT"     value={fmtScore(r.finbert_score)} mono accent={r.finbert_score != null && r.finbert_score > 0.7} />
+        <Field label="Emotion"     value={fmtScore(r.emotion_score)} mono accent={r.emotion_score != null && r.emotion_score > 0.7} />
+        <Field label="Risk Score"  value={fmtScore(r.risk_score_latest)} mono accent={r.risk_score_latest != null && r.risk_score_latest > 0.6} />
+        <Field label="Risk Codes"  value={fmtCodes(r.risk_reason_codes)} />
+
+        {/* IDs */}
+        <SectionLabel>Identifiers</SectionLabel>
         <Field label="From" value={r.from} mono />
         <Field label="To"   value={r.to}   mono />
       </div>
+
       <div className={`mx-4 mb-4 rounded-lg border px-3 py-2 text-[11px] font-medium ${flagCls}`}>
         {e.flagged ? "Flagged transfer — under review" : "Standard transfer"}
       </div>
     </div>
+  )
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mt-2.5 mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+      {children}
+    </p>
   )
 }
 

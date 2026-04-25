@@ -681,21 +681,41 @@ def graph_users():
                 "created_at":       str(props.get("created_at", "")),
             })
 
-        # Fetch edges (Neptune uses id() not elementId())
+        # Fetch edges with all transaction fields
         edge_result = neptune_run(
             "MATCH (a:User)-[r:TRANSFERRED_TO]->(b:User) "
             "RETURN a.user_id AS from_id, id(a) AS from_eid, "
             "b.user_id AS to_id, id(b) AS to_eid, "
-            "r.amount AS amount, r.status AS status, r.timestamp AS ts"
+            "id(r) AS edge_id, "
+            "r.amount AS amount, r.currency AS currency, "
+            "r.status AS status, "
+            "r.tx_time AS tx_time, r.timestamp AS ts, "
+            "r.message_text AS message_text, r.tx_note AS tx_note, "
+            "r.channel AS channel, "
+            "r.finbert_score AS finbert_score, "
+            "r.emotion_score AS emotion_score, "
+            "r.risk_score_latest AS risk_score_latest, "
+            "r.risk_reason_codes AS risk_reason_codes, "
+            "r.updated_at AS updated_at"
         )
         edges = []
         for row in edge_result.get("results", []):
             edges.append({
-                "from":   row.get("from_id") or str(row.get("from_eid", "")),
-                "to":     row.get("to_id")   or str(row.get("to_eid", "")),
-                "amount": float(row.get("amount", 0)),
-                "status": row.get("status", ""),
-                "ts":     str(row.get("ts", "")),
+                "id":                str(row.get("edge_id", "")),
+                "from":              row.get("from_id") or str(row.get("from_eid", "")),
+                "to":                row.get("to_id")   or str(row.get("to_eid", "")),
+                "amount":            float(row.get("amount", 0) or 0),
+                "currency":          str(row.get("currency") or "MYR"),
+                "status":            str(row.get("status") or ""),
+                "tx_time":           str(row.get("tx_time") or row.get("ts") or ""),
+                "message_text":      str(row.get("message_text") or ""),
+                "tx_note":           str(row.get("tx_note") or ""),
+                "channel":           str(row.get("channel") or ""),
+                "finbert_score":     row.get("finbert_score"),
+                "emotion_score":     row.get("emotion_score"),
+                "risk_score_latest": row.get("risk_score_latest"),
+                "risk_reason_codes": row.get("risk_reason_codes"),
+                "updated_at":        str(row.get("updated_at") or ""),
             })
 
         return {
