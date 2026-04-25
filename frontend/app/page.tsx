@@ -4,6 +4,7 @@ import { useState } from "react"
 import { TopNav } from "@/components/guardian/top-nav"
 import { WalletView } from "@/components/guardian/wallet-view"
 import { DashboardView } from "@/components/guardian/dashboard-view"
+import { SpeechToTextCard } from "@/components/guardian/speech-to-text-card"
 
 export type View = "wallet" | "dashboard"
 
@@ -105,6 +106,10 @@ export default function Page() {
         ) : (
           <DashboardView protectedAmount={protectedAmount} threatsBlocked={threatsBlocked} />
         )}
+
+        <div className="mt-6">
+          <SpeechToTextCard />
+        </div>
       </div>
     </main>
   )
