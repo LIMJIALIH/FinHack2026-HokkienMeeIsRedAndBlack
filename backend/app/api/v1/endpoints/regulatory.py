@@ -6,11 +6,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ProfileNotFound
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
-DEFAULT_AWS_PROFILE = "finhack_IsbUsersPS-393886308397"
 DEFAULT_NEPTUNE_CLUSTER_ID = "db-neptune-2"
 
 
@@ -127,9 +126,18 @@ def _layout_positions(node_ids: list[str]) -> dict[str, tuple[float, float]]:
 
 def _resolve_neptune_connection() -> tuple[Any, str, str]:
     region = os.getenv("AWS_REGION", "ap-southeast-1")
-    profile = os.getenv("AWS_PROFILE", DEFAULT_AWS_PROFILE)
+    profile = os.getenv("NEPTUNE_AWS_PROFILE") or os.getenv("AWS_PROFILE")
     cluster_id = os.getenv("NEPTUNE_CLUSTER_ID", DEFAULT_NEPTUNE_CLUSTER_ID)
-    session = boto3.Session(profile_name=profile, region_name=region)
+    try:
+        if profile:
+            session = boto3.Session(profile_name=profile, region_name=region)
+        else:
+            session = boto3.Session(region_name=region)
+    except ProfileNotFound as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AWS profile '{profile}' is not available in this runtime",
+        ) from exc
 
     endpoint = os.getenv("NEPTUNE_ENDPOINT", "").strip()
     if not endpoint:
