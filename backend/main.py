@@ -223,6 +223,13 @@ def neptune_update_kyc(user_id: str, kyc_status: str, updated_at: str) -> None:
     neptune_run(cypher, {"user_id": user_id, "kyc_status": kyc_status, "updated_at": updated_at})
 
 
+def neptune_update_balance(user_id: str, new_balance: float, updated_at: str) -> None:
+    neptune_run(
+        "MATCH (u:User {user_id: $uid}) SET u.balance = $bal, u.updated_at = $ts",
+        {"uid": user_id, "bal": new_balance, "ts": updated_at},
+    )
+
+
 def neptune_get_user(user_id: str) -> Optional[dict]:
     result = neptune_run(
         "MATCH (u:User {user_id: $uid}) RETURN u", {"uid": user_id}
@@ -443,6 +450,10 @@ class KYCCompleteRequest(BaseModel):
     result_code:    Optional[str] = None   # Alibaba resultCode from callback URL ("1001" = passed)
 
 
+class ReloadRequest(BaseModel):
+    amount: float
+
+
 # ── Routes ────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
@@ -532,6 +543,31 @@ def get_me(user_id: str = Depends(get_current_user_id)):
         "kyc_status":         user["kyc_status"],
         "balance":            float(user.get("balance", 0)),
     }
+
+
+@app.post("/wallet/reload")
+def wallet_reload(req: ReloadRequest, user_id: str = Depends(get_current_user_id)):
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    current = float(user.get("balance", 0))
+    new_balance = round(current + req.amount, 2)
+    updated_at = datetime.now(timezone.utc).isoformat()
+    try:
+        dynamo().update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET balance = :b, updated_at = :u",
+            ExpressionAttributeValues={":b": Decimal(str(new_balance)), ":u": updated_at},
+        )
+    except ClientError as e:
+        _handle_dynamo_error(e, "update_item")
+    try:
+        neptune_update_balance(user_id, new_balance, updated_at)
+    except Exception as e:
+        _log.error("Neptune balance update failed: %s", e)
+    return {"new_balance": new_balance}
 
 
 @app.post("/kyc/complete")

@@ -152,6 +152,24 @@ export default function Page() {
     setLastBlocked(null)
   }
 
+  const handleReload = async (amount: number): Promise<void> => {
+    const token = localStorage.getItem("auth_token")
+    if (!token) throw new Error("Not authenticated")
+    const r = await fetch(`${API_URL}/wallet/reload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ amount }),
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error((err as { detail?: string }).detail ?? "Reload failed")
+    }
+    const data = await r.json() as { new_balance: number }
+    const newBal = Number(data.new_balance)
+    setBalance(newBal)
+    setUserBaseBalance(newBal)
+  }
+
   return (
     <main className="min-h-screen bg-background">
       <TopNav
@@ -172,6 +190,7 @@ export default function Page() {
             onScamCanceled={handleScamCanceled}
             onScamProceed={handleScamProceed}
             onReset={handleReset}
+            onReload={isLoggedIn ? handleReload : undefined}
             userName={userName}
           />
         ) : (

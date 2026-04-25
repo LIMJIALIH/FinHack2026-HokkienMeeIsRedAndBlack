@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  PlusCircle,
   RotateCcw,
   Send,
   ShieldAlert,
@@ -20,6 +21,8 @@ import { ScamInterventionModal } from "@/components/guardian/scam-modal"
 import type { Transaction } from "@/app/page"
 import { cn } from "@/lib/utils"
 
+const RELOAD_OPTIONS = [10, 20, 30, 50, 100, 200]
+
 type WalletViewProps = {
   balance: number
   transactions: Transaction[]
@@ -29,6 +32,7 @@ type WalletViewProps = {
   onScamCanceled: () => void
   onScamProceed: () => void
   onReset: () => void
+  onReload?: (amount: number) => Promise<void>
   userName?: string
 }
 
@@ -43,10 +47,12 @@ export function WalletView({
   onScamCanceled,
   onScamProceed,
   onReset,
+  onReload,
   userName,
 }: WalletViewProps) {
   const [flow, setFlow] = useState<FlowState>("idle")
   const [showBalance, setShowBalance] = useState(true)
+  const [showReload, setShowReload] = useState(false)
 
   const triggerSafe = () => {
     setFlow("processing-safe")
@@ -119,8 +125,13 @@ export function WalletView({
       {/* Right column: AI guardian status */}
       <div className="flex flex-col gap-6">
         <GuardianStatusCard />
-        <QuickActionsCard />
+        <QuickActionsCard onReload={onReload ? () => setShowReload(true) : undefined} />
       </div>
+
+      {/* Reload modal */}
+      {showReload && onReload && (
+        <ReloadModal onClose={() => setShowReload(false)} onReload={onReload} />
+      )}
 
       {/* Modal overlays */}
       <ScamInterventionModal
@@ -371,22 +382,112 @@ function GuardianStatusCard() {
   )
 }
 
-function QuickActionsCard() {
-  const actions = ["Reload", "Send", "Pay Bills", "Scan QR"]
+function QuickActionsCard({ onReload }: { onReload?: () => void }) {
+  const actions: { label: string; onClick?: () => void }[] = [
+    { label: "Reload", onClick: onReload },
+    { label: "Send" },
+    { label: "Pay Bills" },
+    { label: "Scan QR" },
+  ]
   return (
     <Card className="p-5 md:p-6">
       <h2 className="text-base font-semibold text-foreground">Quick Actions</h2>
       <div className="mt-4 grid grid-cols-2 gap-2.5">
         {actions.map((a) => (
           <button
-            key={a}
+            key={a.label}
             type="button"
-            className="rounded-md border border-border bg-secondary px-3 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            onClick={a.onClick}
+            disabled={a.label !== "Reload" ? false : !a.onClick}
+            className={cn(
+              "rounded-md border border-border bg-secondary px-3 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent",
+              a.label === "Reload" && a.onClick && "border-primary/40 bg-primary/5 text-primary hover:bg-primary/10",
+            )}
           >
-            {a}
+            {a.label}
           </button>
         ))}
       </div>
     </Card>
+  )
+}
+
+function ReloadModal({
+  onClose,
+  onReload,
+}: {
+  onClose: () => void
+  onReload: (amount: number) => Promise<void>
+}) {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<number | null>(null)
+
+  const handleSelect = async (amount: number) => {
+    setLoading(true)
+    setError(null)
+    try {
+      await onReload(amount)
+      setSuccess(amount)
+      setTimeout(onClose, 1400)
+    } catch (e) {
+      setError((e as Error).message ?? "Reload failed")
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <PlusCircle className="h-5 w-5 text-primary" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-foreground">Reload Wallet</h2>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={loading}
+            className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">Select an amount to top up your eWallet.</p>
+
+        {/* Amount grid */}
+        <div className="mt-5 grid grid-cols-3 gap-2.5">
+          {RELOAD_OPTIONS.map((amt) => (
+            <button
+              key={amt}
+              type="button"
+              onClick={() => handleSelect(amt)}
+              disabled={loading || success !== null}
+              className="rounded-lg border border-border bg-secondary px-3 py-3 text-sm font-semibold text-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:opacity-50"
+            >
+              RM {amt}
+            </button>
+          ))}
+        </div>
+
+        {/* States */}
+        {loading && !success && (
+          <div className="mt-4 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            Processing reload…
+          </div>
+        )}
+        {success !== null && (
+          <div className="mt-4 flex items-center justify-center gap-2 text-sm font-medium text-primary">
+            <CheckCircle2 className="h-4 w-4" />
+            RM {success}.00 added to your wallet!
+          </div>
+        )}
+        {error && (
+          <p className="mt-4 text-center text-sm text-destructive">{error}</p>
+        )}
+      </div>
+    </div>
   )
 }
