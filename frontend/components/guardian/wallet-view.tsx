@@ -29,6 +29,7 @@ type WalletViewProps = {
   onScamCanceled: () => void
   onScamProceed: () => void
   onReset: () => void
+  userName?: string
 }
 
 type FlowState = "idle" | "processing-safe" | "scam-detected" | "processing-scam" | "success-safe"
@@ -42,6 +43,7 @@ export function WalletView({
   onScamCanceled,
   onScamProceed,
   onReset,
+  userName,
 }: WalletViewProps) {
   const [flow, setFlow] = useState<FlowState>("idle")
   const [showBalance, setShowBalance] = useState(true)
@@ -74,7 +76,7 @@ export function WalletView({
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       {/* Left column: balance + actions */}
       <div className="flex flex-col gap-6 lg:col-span-2">
-        <BalanceCard balance={balance} showBalance={showBalance} onToggle={() => setShowBalance((s) => !s)} />
+        <BalanceCard balance={balance} showBalance={showBalance} onToggle={() => setShowBalance((s) => !s)} userName={userName} />
 
         {lastBlocked && (
           <Card className="flex items-start justify-between gap-4 border-primary/30 bg-primary/5 p-4">
@@ -146,10 +148,12 @@ function BalanceCard({
   balance,
   showBalance,
   onToggle,
+  userName,
 }: {
   balance: number
   showBalance: boolean
   onToggle: () => void
+  userName?: string
 }) {
   return (
     <Card className="overflow-hidden border-0 bg-primary p-0 text-primary-foreground shadow-sm">
@@ -174,7 +178,7 @@ function BalanceCard({
                 {showBalance ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
-            <p className="mt-3 text-sm text-primary-foreground/80">Ahmad Bin Ali · ****6721</p>
+            <p className="mt-3 text-sm text-primary-foreground/80">{userName || "Ahmad Bin Ali"} · ****6721</p>
           </div>
           <div className="flex flex-col items-end gap-2 text-right">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-primary-foreground/15 px-2.5 py-1 text-xs font-medium">

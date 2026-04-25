@@ -1,253 +1,278 @@
 "use client"
 
-import { Globe, User, UserX, Wallet } from "lucide-react"
+import { useEffect, useState } from "react"
+import { User, UserX } from "lucide-react"
 
-type NodeKind = "user" | "neutral" | "flagged" | "mule"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+type NodeKind = "trusted" | "neutral" | "flagged"
 
 type GraphNode = {
   id: string
   label: string
-  sublabel?: string
+  sublabel: string
   x: number
   y: number
   kind: NodeKind
-  icon: "user" | "wallet" | "ip" | "mule"
 }
 
 type GraphEdge = {
   from: string
   to: string
-  label?: string
-  flagged?: boolean
+  label: string
+  flagged: boolean
 }
 
-const NODES: GraphNode[] = [
-  { id: "user", label: "Ahmad Bin Ali", sublabel: "Sender · ****6721", x: 90, y: 200, kind: "user", icon: "user" },
-  {
-    id: "target",
-    label: "Investment Agent",
-    sublabel: "Target · ****9024",
-    x: 360,
-    y: 90,
-    kind: "flagged",
-    icon: "wallet",
-  },
-  {
-    id: "ip",
-    label: "Shared IP",
-    sublabel: "203.82.x.x",
-    x: 360,
-    y: 310,
-    kind: "flagged",
-    icon: "ip",
-  },
-  {
-    id: "mule",
-    label: "Mule Cluster #442",
-    sublabel: "Known laundering",
-    x: 620,
-    y: 200,
-    kind: "mule",
-    icon: "mule",
-  },
-]
+type ApiNode = {
+  id: string
+  name: string
+  risk_tier_current: string
+  status: string
+  risk_score_latest: number
+}
 
-const EDGES: GraphEdge[] = [
-  { from: "user", to: "target", label: "RM 1,000 · attempted" },
-  { from: "target", to: "ip", label: "logged-in IP", flagged: true },
-  { from: "ip", to: "mule", label: "shared with", flagged: true },
-  { from: "target", to: "mule", label: "1-hop link", flagged: true },
-]
+type ApiEdge = {
+  from: string
+  to: string
+  amount: number
+  status: string
+}
 
-const VIEWBOX = { w: 720, h: 400 }
+type GraphData = {
+  nodes: ApiNode[]
+  edges: ApiEdge[]
+  source: string
+  fetched_at: string
+}
+
+const VIEWBOX = { w: 820, h: 520 }
+
+function kindFor(tier: string, status: string): NodeKind {
+  if (tier === "high" || status === "blocked") return "flagged"
+  if (tier === "low" || status === "approved") return "trusted"
+  return "neutral"
+}
+
+function sublabelFor(tier: string, status: string): string {
+  if (status && status !== "") return status
+  if (tier && tier !== "") return tier
+  return "unrated"
+}
+
+function buildGraph(apiNodes: ApiNode[], apiEdges: ApiEdge[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const n = apiNodes.length
+  if (n === 0) return { nodes: [], edges: [] }
+
+  // Position nodes: connected ones around a ring, isolated ones in center area
+  const idToIdx: Record<string, number> = {}
+  apiNodes.forEach((node, i) => { idToIdx[node.id] = i })
+
+  const connected = new Set<string>()
+  apiEdges.forEach(e => { connected.add(e.from); connected.add(e.to) })
+
+  const connectedNodes = apiNodes.filter(n => connected.has(n.id))
+  const isolatedNodes  = apiNodes.filter(n => !connected.has(n.id))
+
+  const cx = VIEWBOX.w / 2
+  const cy = VIEWBOX.h / 2 - 20
+  const radius = Math.min(cx, cy) - 80
+
+  const positions: Record<string, { x: number; y: number }> = {}
+
+  connectedNodes.forEach((node, i) => {
+    const angle = (2 * Math.PI * i) / connectedNodes.length - Math.PI / 2
+    positions[node.id] = {
+      x: Math.round(cx + radius * Math.cos(angle)),
+      y: Math.round(cy + radius * Math.sin(angle)),
+    }
+  })
+
+  // Isolated nodes cluster near centre
+  isolatedNodes.forEach((node, i) => {
+    const spread = isolatedNodes.length > 1 ? (i - (isolatedNodes.length - 1) / 2) * 120 : 0
+    positions[node.id] = { x: Math.round(cx + spread), y: Math.round(cy + 10) }
+  })
+
+  const nodes: GraphNode[] = apiNodes.map(node => ({
+    id: node.id,
+    label: node.name || "User",
+    sublabel: sublabelFor(node.risk_tier_current, node.status),
+    kind: kindFor(node.risk_tier_current, node.status),
+    ...positions[node.id],
+  }))
+
+  const nodeIds = new Set(nodes.map(n => n.id))
+  const edges: GraphEdge[] = apiEdges
+    .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
+    .map(e => ({
+      from: e.from,
+      to: e.to,
+      label: `MYR ${Number(e.amount).toFixed(2)} - ${e.status}`,
+      flagged: e.status === "warned" || e.status === "blocked",
+    }))
+
+  return { nodes, edges }
+}
 
 export function FraudGraph() {
-  return (
-    <div className="w-full">
-      <svg
-        viewBox={`0 0 ${VIEWBOX.w} ${VIEWBOX.h}`}
-        className="h-auto w-full"
-        role="img"
-        aria-label="Node-link diagram of the blocked fraud ring connecting the sender, target account, shared IP, and known mule cluster"
-      >
-        <defs>
-          <marker
-            id="arrow-flag"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="6"
-            markerHeight="6"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="oklch(0.58 0.22 25)" />
-          </marker>
-          <marker
-            id="arrow-neutral"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="6"
-            markerHeight="6"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="oklch(0.5 0.02 250)" />
-          </marker>
-        </defs>
+  const [nodes, setNodes] = useState<GraphNode[]>([])
+  const [edges, setEdges] = useState<GraphEdge[]>([])
+  const [source, setSource] = useState("")
+  const [fetchedAt, setFetchedAt] = useState("")
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
-        {/* Edges */}
-        <g>
-          {EDGES.map((edge) => {
-            const a = NODES.find((n) => n.id === edge.from)!
-            const b = NODES.find((n) => n.id === edge.to)!
-            const stroke = edge.flagged ? "oklch(0.58 0.22 25)" : "oklch(0.5 0.02 250)"
-            const dash = edge.flagged ? "0" : "4 4"
-            const midX = (a.x + b.x) / 2
-            const midY = (a.y + b.y) / 2
-            return (
-              <g key={`${edge.from}-${edge.to}`}>
-                <line
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke={stroke}
-                  strokeWidth={edge.flagged ? 2 : 1.5}
-                  strokeDasharray={dash}
-                  markerEnd={edge.flagged ? "url(#arrow-flag)" : "url(#arrow-neutral)"}
-                  opacity={edge.flagged ? 0.95 : 0.7}
-                />
-                {edge.label && (
+  useEffect(() => {
+    fetch(`${API_URL}/graph/users`)
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<GraphData>
+      })
+      .then(data => {
+        const { nodes: gn, edges: ge } = buildGraph(data.nodes ?? [], data.edges ?? [])
+        setNodes(gn)
+        setEdges(ge)
+        setSource(data.source ?? "db-neptune-2")
+        const d = new Date(data.fetched_at)
+        setFetchedAt(isNaN(d.getTime()) ? data.fetched_at : d.toLocaleString("en-MY", { dateStyle: "short", timeStyle: "short" }))
+        setLoading(false)
+      })
+      .catch(e => {
+        setError(String(e.message ?? e))
+        setLoading(false)
+      })
+  }, [])
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-xs text-muted-foreground">
+        Live node-edge relationship graph from Neptune &lsquo;db-neptune-2&rsquo;.
+      </p>
+
+      {error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          Failed to load Neptune graph: {error}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-dashed border-border bg-background p-2">
+        {loading ? (
+          <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+            Loading graph…
+          </div>
+        ) : nodes.length === 0 ? (
+          <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
+            No live Neptune graph data found.
+          </div>
+        ) : (
+          <svg
+            viewBox={`0 0 ${VIEWBOX.w} ${VIEWBOX.h}`}
+            className="h-auto w-full"
+            role="img"
+            aria-label="Live fraud network graph from Neptune"
+          >
+            <defs>
+              <marker id="arr-flag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="oklch(0.58 0.22 25)" />
+              </marker>
+              <marker id="arr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="oklch(0.5 0.02 250)" />
+              </marker>
+            </defs>
+
+            {/* Edges */}
+            {edges.map(edge => {
+              const a = nodes.find(n => n.id === edge.from)
+              const b = nodes.find(n => n.id === edge.to)
+              if (!a || !b) return null
+              const stroke = edge.flagged ? "oklch(0.58 0.22 25)" : "oklch(0.6 0.02 250)"
+              const midX = (a.x + b.x) / 2
+              const midY = (a.y + b.y) / 2
+              return (
+                <g key={`${edge.from}-${edge.to}`}>
+                  <line
+                    x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                    stroke={stroke}
+                    strokeWidth={edge.flagged ? 2 : 1.5}
+                    strokeDasharray={edge.flagged ? "0" : "5 4"}
+                    markerEnd={edge.flagged ? "url(#arr-flag)" : "url(#arr-ok)"}
+                    opacity={edge.flagged ? 0.9 : 0.65}
+                  />
                   <g transform={`translate(${midX} ${midY})`}>
                     <rect
-                      x={-((edge.label.length * 5.6) / 2) - 8}
-                      y={-10}
-                      width={edge.label.length * 5.6 + 16}
-                      height={20}
-                      rx={10}
-                      fill="oklch(1 0 0)"
-                      stroke="oklch(0.9 0.01 250)"
+                      x={-((edge.label.length * 5.2) / 2) - 6}
+                      y={-9}
+                      width={edge.label.length * 5.2 + 12}
+                      height={18}
+                      rx={9}
+                      fill="white"
+                      stroke="oklch(0.88 0.01 250)"
                     />
                     <text
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      fontSize="11"
-                      fontFamily="var(--font-mono)"
-                      fill={edge.flagged ? "oklch(0.58 0.22 25)" : "oklch(0.4 0.02 250)"}
+                      fontSize="10"
+                      fontFamily="var(--font-mono, monospace)"
+                      fill={edge.flagged ? "oklch(0.55 0.22 25)" : "oklch(0.4 0.02 250)"}
                     >
                       {edge.label}
                     </text>
                   </g>
-                )}
-              </g>
-            )
-          })}
-        </g>
+                </g>
+              )
+            })}
 
-        {/* Nodes */}
-        <g>
-          {NODES.map((node) => (
-            <NodeBubble key={node.id} node={node} />
-          ))}
-        </g>
-      </svg>
+            {/* Nodes */}
+            {nodes.map(node => (
+              <NodeBubble key={node.id} node={node} />
+            ))}
+          </svg>
+        )}
+      </div>
+
+      {!loading && (
+        <p className="text-[11px] text-muted-foreground">
+          Source: {source} | Last fetched: {fetchedAt || "—"}
+        </p>
+      )}
     </div>
   )
 }
 
 function NodeBubble({ node }: { node: GraphNode }) {
-  const palette = paletteFor(node.kind)
-  const isFlagged = node.kind === "flagged" || node.kind === "mule"
+  const pal = palette(node.kind)
+  const isFlagged = node.kind === "flagged"
 
   return (
     <g transform={`translate(${node.x} ${node.y})`}>
       {isFlagged && (
-        <circle
-          r={42}
-          fill={palette.haloFill}
-          opacity={0.5}
-        >
-          <animate
-            attributeName="r"
-            values="40;48;40"
-            dur="2.4s"
-            repeatCount="indefinite"
-          />
-          <animate
-            attributeName="opacity"
-            values="0.55;0.15;0.55"
-            dur="2.4s"
-            repeatCount="indefinite"
-          />
+        <circle r={44} fill={pal.halo} opacity={0.45}>
+          <animate attributeName="r" values="40;50;40" dur="2.4s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.5;0.1;0.5" dur="2.4s" repeatCount="indefinite" />
         </circle>
       )}
-      <circle r={32} fill={palette.bg} stroke={palette.border} strokeWidth={2} />
-
-      <foreignObject x={-12} y={-12} width={24} height={24}>
-        <div
-          className="flex h-6 w-6 items-center justify-center"
-          style={{ color: palette.icon }}
-        >
-          <NodeIcon kind={node.icon} />
+      <circle r={30} fill={pal.bg} stroke={pal.border} strokeWidth={2.5} />
+      <foreignObject x={-10} y={-10} width={20} height={20}>
+        <div className="flex h-5 w-5 items-center justify-center" style={{ color: pal.icon }}>
+          {isFlagged
+            ? <UserX className="h-4 w-4" aria-hidden="true" />
+            : <User className="h-4 w-4" aria-hidden="true" />}
         </div>
       </foreignObject>
-
-      <text
-        y={50}
-        textAnchor="middle"
-        fontSize="12"
-        fontWeight="600"
-        fill="oklch(0.18 0.02 250)"
-      >
+      <text y={46} textAnchor="middle" fontSize="12" fontWeight="600" fill="oklch(0.18 0.02 250)">
         {node.label}
       </text>
-      {node.sublabel && (
-        <text
-          y={66}
-          textAnchor="middle"
-          fontSize="10.5"
-          fill="oklch(0.5 0.02 250)"
-        >
-          {node.sublabel}
-        </text>
-      )}
+      <text y={60} textAnchor="middle" fontSize="10" fill="oklch(0.5 0.02 250)">
+        {node.sublabel}
+      </text>
     </g>
   )
 }
 
-function NodeIcon({ kind }: { kind: GraphNode["icon"] }) {
-  if (kind === "user") return <User className="h-5 w-5" aria-hidden="true" />
-  if (kind === "wallet") return <Wallet className="h-5 w-5" aria-hidden="true" />
-  if (kind === "ip") return <Globe className="h-5 w-5" aria-hidden="true" />
-  return <UserX className="h-5 w-5" aria-hidden="true" />
-}
-
-function paletteFor(kind: NodeKind) {
-  if (kind === "user")
-    return {
-      bg: "oklch(0.97 0.04 255)",
-      border: "oklch(0.52 0.21 255)",
-      icon: "oklch(0.52 0.21 255)",
-      haloFill: "oklch(0.52 0.21 255)",
-    }
+function palette(kind: NodeKind) {
+  if (kind === "trusted")
+    return { bg: "oklch(0.97 0.04 255)", border: "oklch(0.52 0.21 255)", icon: "oklch(0.52 0.21 255)", halo: "oklch(0.52 0.21 255)" }
   if (kind === "flagged")
-    return {
-      bg: "oklch(0.97 0.04 25)",
-      border: "oklch(0.58 0.22 25)",
-      icon: "oklch(0.58 0.22 25)",
-      haloFill: "oklch(0.58 0.22 25)",
-    }
-  if (kind === "mule")
-    return {
-      bg: "oklch(0.96 0.06 25)",
-      border: "oklch(0.45 0.22 25)",
-      icon: "oklch(0.45 0.22 25)",
-      haloFill: "oklch(0.45 0.22 25)",
-    }
-  return {
-    bg: "oklch(0.96 0.01 250)",
-    border: "oklch(0.85 0.01 250)",
-    icon: "oklch(0.4 0.02 250)",
-    haloFill: "oklch(0.85 0.01 250)",
-  }
+    return { bg: "oklch(0.97 0.05 25)",  border: "oklch(0.55 0.22 25)",  icon: "oklch(0.55 0.22 25)",  halo: "oklch(0.55 0.22 25)" }
+  return   { bg: "oklch(0.96 0.01 250)", border: "oklch(0.78 0.01 250)", icon: "oklch(0.45 0.02 250)", halo: "oklch(0.78 0.01 250)" }
 }
