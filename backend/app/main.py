@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from transaction_agent import build_main_deep_agent
 from app.api.v1.router import api_router
 from app.core.config import Settings
-from app.services.risk_engine import MockGraphRiskClient, NeptuneRiskClient, RiskEngine, build_graph
+from app.services.risk_engine import NeptuneRiskClient, RiskEngine, build_graph
 from app.services.warnings import InMemoryWarningStore
 
 logger = logging.getLogger(__name__)
@@ -26,15 +26,13 @@ def create_app() -> FastAPI:
     settings = Settings()
     logging.getLogger("google_genai.types").addFilter(_GoogleToolCallTextWarningFilter())
 
-    graph_client = None
-    if settings.neptune_endpoint:
-        graph_client = NeptuneRiskClient(
-            endpoint=settings.neptune_endpoint,
-            region=settings.aws_region,
-            profile=settings.aws_profile or None,
-        )
-    elif settings.use_mock_graph:
-        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
+    if not settings.neptune_endpoint:
+        raise RuntimeError("NEPTUNE_ENDPOINT is required. Mock graph mode has been removed.")
+    graph_client = NeptuneRiskClient(
+        endpoint=settings.neptune_endpoint,
+        region=settings.aws_region,
+        profile=settings.aws_profile or None,
+    )
 
     risk_engine = RiskEngine(graph_client=graph_client)
 

@@ -198,8 +198,6 @@ def _collect_action_steps(messages: list[Any]) -> list[str]:
             summary = _summarize_tool_name(name)
             if summary not in steps:
                 steps.append(summary)
-    if not steps:
-        steps = ["Checking your request", "Running safety checks"]
     return steps
 
 
@@ -276,8 +274,8 @@ You are a friendly and helpful transfer assistant inside a Malaysian eWallet app
 You help users send money safely.
 
 PRIMARY OBJECTIVE
-Given a user's transfer request, look up contacts and check safety, then
-call execute_transfer to send the money. Always prioritise protecting the user.
+First, classify the user's intent. Only run transfer investigation/execution when
+the user is asking to send/transfer money. Always prioritise protecting the user.
 Never invent information.
 
 INPUT CONTRACT
@@ -286,39 +284,43 @@ Each turn includes:
 - user_request
 Always treat sender_user_id as the sender identity for internal tool calls.
 
-AVAILABLE TOOLS (internal — NEVER mention tool names to the user)
+AVAILABLE TOOLS (internal - NEVER mention tool names to the user)
 - search_contact_nodes_tool: find contacts by name
 - get_user_node_info_tool: look up account details
 - get_transfer_edges_info_tool: check transfer history
 - get_neptune_graph_overview_tool: run broader safety checks
 - execute_transfer: send the money (paused for user approval)
 
+INTENT GATE (MANDATORY, FIRST STEP EVERY TURN)
+1) Decide whether the latest user message is transfer-related.
+2) If NOT transfer-related:
+   - Reply naturally to the user request.
+   - DO NOT call any transfer tools.
+   - DO NOT run safety/investigation steps.
+   - Keep response concise and helpful.
+3) If transfer-related:
+   - Continue with the transfer workflow below.
+
 TOOL USAGE POLICY
 1) Recipient resolution:
-   - ALWAYS search contacts when any recipient name is mentioned.
-   - Pick the BEST matching contact automatically. Do NOT ask the user to choose.
-   - If no match is found, use the name as-is and proceed anyway.
+   - Search contacts when any recipient name is mentioned.
+   - Pick the best matching contact automatically.
+   - If no match is found, use the provided name as-is and continue.
 2) Before calling execute_transfer:
    - Look up sender account info.
    - Look up recipient account info.
    - Check transfer history between them.
-3) ALWAYS call execute_transfer as soon as evidence is gathered.
+3) Call execute_transfer as soon as enough evidence is gathered.
    The system will show a review screen where the user can approve or reject.
-   Do NOT ask the user to confirm before calling execute_transfer — that is
+   Do NOT ask the user to confirm before calling execute_transfer - that is
    what the review screen is for.
-
-IMPORTANT: NEVER ask follow-up questions if the user has given a recipient
-and an amount. Go straight to investigation and execute_transfer.
-Only ask if the user's message has NO recipient AND NO amount at all
-(e.g. just "send money" with nothing else).
 
 INCOMPLETE REQUEST POLICY
 - If greeting ("hi", "hello"), reply warmly and ask what they'd like to send.
-- Only ask if BOTH recipient and amount are completely missing.
-- If you have at least a recipient OR an amount, proceed with what you have
-  and use sensible defaults. The HITL review screen will catch any issues.
+- For transfer intent, only ask follow-up when details are too ambiguous to act on.
+- If recipient and amount are clear enough, proceed without extra questions.
 
-RISK ASSESSMENT (internal — simplified for user)
+RISK ASSESSMENT (internal - simplified for user)
 When calling execute_transfer, set:
 - risk_score: 0-100
 - reason_codes: machine labels (user never sees these)
@@ -328,7 +330,7 @@ When calling execute_transfer, set:
   Example: "This is a large transfer to someone you haven't paid before.
             Please double-check before confirming."
 
-COMMUNICATION STYLE — MANDATORY
+COMMUNICATION STYLE - MANDATORY
 - Use short, simple sentences a non-technical person can understand.
 - NEVER expose: user_id, node, edge, graph, tool names, reason_codes,
   evidence_refs, risk_score numbers, internal system details.
@@ -397,6 +399,18 @@ def run_main_turn(
     resolved_user_id = _resolve_user_id(user_id)
     config = _runtime_config(resolved_thread_id)
 
+    # If this thread has unresolved interrupts from a previous turn
+    # (orphaned tool_calls), start a fresh thread to avoid OpenAI
+    # rejecting the malformed message history.
+    if thread_id:
+        try:
+            state = agent.agent.get_state(config)
+            if state.tasks:
+                resolved_thread_id = str(uuid.uuid4())
+                config = _runtime_config(resolved_thread_id)
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         agent.agent.invoke(
             _build_turn_payload(text=text, user_id=resolved_user_id),
@@ -426,7 +440,7 @@ def _build_response_from_state(
     """Inspect the graph state and return the appropriate response payload."""
     state = agent.agent.get_state(config)
     messages = state.values.get("messages", [])
-    steps = _collect_action_steps(messages)
+    steps = ["Analyzing your intent", *_collect_action_steps(messages)]
 
     # --- Interrupted → HITL required ----------------------------------
     if state.tasks:
@@ -567,12 +581,14 @@ def run_main_turn_stream_events(
 ) -> Generator[dict[str, Any], None, None]:
     """Yield SSE-compatible events for a single user turn."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
-    yield {"event": "step", "summary": "Checking your request"}
-    yield {"event": "step", "summary": "Running safety checks"}
+    yield {"event": "step", "summary": "Analyzing your intent"}
     result = run_main_turn(
         agent=agent,
         text=text,
         thread_id=resolved_thread_id,
         user_id=user_id,
     )
+    for step in result.get("result", {}).get("steps", []):
+        if step != "Analyzing your intent":
+            yield {"event": "step", "summary": step}
     yield {"event": "final", "payload": result}

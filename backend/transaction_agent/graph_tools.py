@@ -8,7 +8,7 @@ from langgraph.config import get_stream_writer
 
 from app.core.config import Settings
 from app.schemas.transfer import TransferEvaluateRequest
-from app.services.risk_engine import MockGraphRiskClient, NeptuneRiskClient, RiskEngine
+from app.services.risk_engine import NeptuneRiskClient, RiskEngine
 
 
 USER_NODE_FIELDS = [
@@ -61,8 +61,6 @@ def _build_risk_engine() -> RiskEngine:
             region=settings.aws_region,
             profile=settings.aws_profile or None,
         )
-    elif settings.use_mock_graph:
-        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
     return RiskEngine(graph_client=graph_client)
 
 
@@ -130,21 +128,11 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             return {"query": query, "contacts": [], "error": f"neptune_search_failed: {exc}"}
 
-    if settings.use_mock_graph:
-        mock_contacts = [
-            {"user_id": "ali", "graph_id": "user:ali", "display_name": "Ali"},
-            {"user_id": "investment_agent", "graph_id": "user:investment_agent", "display_name": "Investment Agent"},
-            {"user_id": "siti", "graph_id": "user:siti", "display_name": "Siti"},
-            {"user_id": "ahmad", "graph_id": "user:ahmad", "display_name": "Ahmad"},
-        ]
-        ranked = [
-            contact
-            for contact in mock_contacts
-            if q in contact["display_name"].lower() or q in contact["user_id"]
-        ]
-        return {"query": query, "contacts": ranked[: max(1, int(limit))]}
-
-    return {"query": query, "contacts": []}
+    return {
+        "query": query,
+        "contacts": [],
+        "error": "neptune_not_configured",
+    }
 
 
 def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
@@ -182,79 +170,15 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
                 "error": f"neptune_user_lookup_failed: {exc}",
             }
 
-    if settings.use_mock_graph:
-        mock_users = {
-            "user:marcus": {
-                "~id": "user:marcus",
-                "name": "Marcus",
-                "balance": 2480.0,
-                "ekyc_status": "verified",
-                "ekyc_level": "full",
-                "hashed_phone": "hash:sender_phone",
-                "hashed_ic": "hash:sender_ic",
-                "risk_tier_current": "low",
-                "summary_text_latest": "Regular wallet user with stable transfer history.",
-                "summary_updated_at": "2026-04-25T12:00:00Z",
-                "summary_agent_version": "mock-v1",
-                "created_at": 1714000000,
-                "updated_at": 1777100000,
-            },
-            "user:ali": {
-                "~id": "user:ali",
-                "name": "Ali",
-                "balance": 360.0,
-                "ekyc_status": "verified",
-                "ekyc_level": "basic",
-                "hashed_phone": "hash:ali_phone",
-                "hashed_ic": "hash:ali_ic",
-                "risk_tier_current": "low",
-                "summary_text_latest": "Known contact with normal peer transfers.",
-                "summary_updated_at": "2026-04-25T12:00:00Z",
-                "summary_agent_version": "mock-v1",
-                "created_at": 1714100000,
-                "updated_at": 1777100000,
-            },
-            "user:investment_agent": {
-                "~id": "user:investment_agent",
-                "name": "Investment Agent",
-                "balance": 18420.0,
-                "ekyc_status": "unverified",
-                "ekyc_level": "none",
-                "hashed_phone": "hash:investment_phone",
-                "hashed_ic": None,
-                "risk_tier_current": "high",
-                "summary_text_latest": "Recipient has repeated warned and blocked incoming transfer history.",
-                "summary_updated_at": "2026-04-25T12:00:00Z",
-                "summary_agent_version": "mock-v1",
-                "created_at": 1776900000,
-                "updated_at": 1777100000,
-            },
-            "user:siti": {
-                "~id": "user:siti",
-                "name": "Siti",
-                "balance": 920.0,
-                "ekyc_status": "verified",
-                "ekyc_level": "full",
-                "hashed_phone": "hash:siti_phone",
-                "hashed_ic": "hash:siti_ic",
-                "risk_tier_current": "medium",
-                "summary_text_latest": "Known contact with mixed prior transaction sentiment.",
-                "summary_updated_at": "2026-04-25T12:00:00Z",
-                "summary_agent_version": "mock-v1",
-                "created_at": 1714200000,
-                "updated_at": 1777100000,
-            },
-        }
-        return {
-            "user_id": user_id,
-            "graph_id": graph_id,
-            "schema": "(:User)",
-            "fields": USER_NODE_FIELDS,
-            "node": mock_users.get(graph_id),
-            "source": "mock",
-        }
-
-    return {"user_id": user_id, "graph_id": graph_id, "schema": "(:User)", "fields": USER_NODE_FIELDS, "node": None, "source": "none"}
+    return {
+        "user_id": user_id,
+        "graph_id": graph_id,
+        "schema": "(:User)",
+        "fields": USER_NODE_FIELDS,
+        "node": None,
+        "source": "none",
+        "error": "neptune_not_configured",
+    }
 
 
 def get_transfer_edges_info_tool(

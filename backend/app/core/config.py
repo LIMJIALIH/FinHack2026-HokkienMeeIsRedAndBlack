@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     aws_region: str = "ap-southeast-1"
     aws_profile: str = ""
     neptune_endpoint: str = ""
-    use_mock_graph: bool = False
     dev_user_id: str = "Eric Wong"
     warning_delay_seconds: int = 30
     api_cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
