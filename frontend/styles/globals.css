@@ -37,6 +37,18 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* Status semantic tokens */
+  --status-approved: oklch(0.55 0.16 145);
+  --status-approved-bg: oklch(0.95 0.03 145);
+  --status-pending: oklch(0.7 0.18 75);
+  --status-pending-bg: oklch(0.96 0.04 75);
+  --status-warned: oklch(0.65 0.2 55);
+  --status-warned-bg: oklch(0.95 0.04 55);
+  --status-blocked: oklch(0.58 0.22 27);
+  --status-blocked-bg: oklch(0.95 0.04 27);
+  --status-reversed: oklch(0.55 0 0);
+  --status-reversed-bg: oklch(0.95 0 0);
 }
 
 .dark {
@@ -72,6 +84,18 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.439 0 0);
+
+  /* Status semantic tokens — dark */
+  --status-approved: oklch(0.7 0.18 150);
+  --status-approved-bg: oklch(0.25 0.04 150);
+  --status-pending: oklch(0.78 0.16 80);
+  --status-pending-bg: oklch(0.25 0.04 80);
+  --status-warned: oklch(0.75 0.18 60);
+  --status-warned-bg: oklch(0.25 0.04 60);
+  --status-blocked: oklch(0.65 0.2 27);
+  --status-blocked-bg: oklch(0.22 0.04 27);
+  --status-reversed: oklch(0.65 0 0);
+  --status-reversed-bg: oklch(0.22 0 0);
 }
 
 @theme inline {
@@ -113,6 +137,13 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Animation tokens */
+  --animate-slide-in-up: slide-in-up 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-expand-down: expand-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-status-pulse: status-pulse 2s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-toast-slide: toast-slide 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @layer base {
@@ -121,5 +152,61 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/* Transaction animations */
+@keyframes slide-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes expand-down {
+  from {
+    opacity: 0;
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 300px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+}
+
+@keyframes status-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes toast-slide {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
 }

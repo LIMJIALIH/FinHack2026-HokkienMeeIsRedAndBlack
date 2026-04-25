@@ -5,13 +5,21 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   CheckCircle2,
+  ChevronDown,
+  Clock,
   Eye,
   EyeOff,
   Loader2,
   Mic,
+  Radio,
+  RotateCcw,
   ShieldAlert,
+  ShieldBan,
+  ShieldCheck,
   Sparkles,
+  TriangleAlert,
   X,
+  XCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -295,14 +303,15 @@ export function WalletView({
         <QuickActionsCard />
       </div>
 
-      {flow === "success-safe" && (
+      {flow === "success-safe" && transactions.length > 0 && (
         <div
           role="status"
           className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-lg"
+          style={{ animation: "var(--animate-toast-slide)" }}
         >
           <span className="inline-flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4 text-primary" aria-hidden="true" />
-            Transfer of RM 15.00 to Ali completed
+            <CheckCircle2 className="h-4 w-4" style={{ color: "var(--status-approved)" }} aria-hidden="true" />
+            Transfer of RM {transactions[0].amount.toFixed(2)} to {transactions[0].recipient} completed
           </span>
         </div>
       )}
@@ -487,54 +496,281 @@ function SimulationPanel({
   )
 }
 
+/* ------------------------------------------------------------------ */
+/*  Status config                                                      */
+/* ------------------------------------------------------------------ */
+
+type StatusConfig = {
+  label: string
+  color: string
+  bg: string
+  icon: React.ReactNode
+  pulse?: boolean
+}
+
+function statusConfig(status: string): StatusConfig {
+  switch (status) {
+    case "approved":
+    case "completed":
+      return {
+        label: "Approved",
+        color: "var(--status-approved)",
+        bg: "var(--status-approved-bg)",
+        icon: <ShieldCheck className="h-3 w-3" />,
+      }
+    case "pending_hitl":
+      return {
+        label: "Pending review",
+        color: "var(--status-pending)",
+        bg: "var(--status-pending-bg)",
+        icon: <Clock className="h-3 w-3" />,
+        pulse: true,
+      }
+    case "warned":
+      return {
+        label: "Warned",
+        color: "var(--status-warned)",
+        bg: "var(--status-warned-bg)",
+        icon: <TriangleAlert className="h-3 w-3" />,
+      }
+    case "blocked":
+      return {
+        label: "Blocked",
+        color: "var(--status-blocked)",
+        bg: "var(--status-blocked-bg)",
+        icon: <ShieldBan className="h-3 w-3" />,
+      }
+    case "reversed":
+      return {
+        label: "Reversed",
+        color: "var(--status-reversed)",
+        bg: "var(--status-reversed-bg)",
+        icon: <RotateCcw className="h-3 w-3" />,
+      }
+    default:
+      return {
+        label: status,
+        color: "var(--muted-foreground)",
+        bg: "var(--muted)",
+        icon: <Radio className="h-3 w-3" />,
+      }
+  }
+}
+
+function riskDotColor(score: number): string | null {
+  if (score >= 70) return "var(--status-blocked)"
+  if (score >= 30) return "var(--status-warned)"
+  return null
+}
+
+/* ------------------------------------------------------------------ */
+/*  RecentTransactions                                                 */
+/* ------------------------------------------------------------------ */
+
 function RecentTransactions({ transactions }: { transactions: Transaction[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const toggle = (id: string) =>
+    setExpandedId((prev) => (prev === id ? null : id))
+
   return (
-    <Card className="p-5 md:p-6">
-      <div className="flex items-center justify-between">
+    <Card className="overflow-hidden p-0">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 pt-5 md:px-6 md:pt-6">
         <h2 className="text-base font-semibold text-foreground">Recent Transactions</h2>
-        <span className="text-xs text-muted-foreground">{transactions.length} entries</span>
+        <span
+          className="rounded-full px-2.5 py-0.5 text-xs font-medium"
+          style={{ color: "var(--muted-foreground)", background: "var(--muted)" }}
+        >
+          {transactions.length}
+        </span>
       </div>
 
-      <ul className="mt-4 divide-y divide-border">
+      {/* List */}
+      <div className="mt-3 flex flex-col gap-1.5 px-3 pb-4 md:px-4 md:pb-5">
         {transactions.length === 0 && (
-          <li className="py-6 text-center text-sm text-muted-foreground">No transactions yet</li>
+          <div className="flex flex-col items-center gap-2 py-10 text-center">
+            <div
+              className="flex h-12 w-12 items-center justify-center rounded-full"
+              style={{ background: "var(--muted)" }}
+            >
+              <ArrowUpRight className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <p className="text-sm text-muted-foreground">No transactions yet</p>
+            <p className="text-xs text-muted-foreground">Send your first transfer to get started</p>
+          </div>
         )}
-        {transactions.map((tx) => {
+
+        {transactions.map((tx, idx) => {
           const sent = tx.type === "sent"
+          const sc = statusConfig(tx.status)
+          const riskDot = riskDotColor(tx.risk_score)
+          const isExpanded = expandedId === tx.id
+          const isNew = idx === 0 && tx.date === "Just now"
+
           return (
-            <li key={tx.id} className="flex items-center justify-between gap-4 py-3.5">
-              <div className="flex min-w-0 items-center gap-3">
+            <div
+              key={tx.id}
+              className="group rounded-xl border border-border bg-card transition-shadow hover:shadow-sm"
+              style={isNew ? { animation: "var(--animate-slide-in-up)" } : undefined}
+            >
+              {/* Main row — tappable */}
+              <button
+                type="button"
+                onClick={() => toggle(tx.id)}
+                className="flex w-full items-center gap-3 px-3.5 py-3 text-left active:bg-accent/50 md:px-4"
+                aria-expanded={isExpanded}
+                aria-controls={`tx-detail-${tx.id}`}
+              >
+                {/* Direction icon */}
                 <div
                   className={cn(
-                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                    sent ? "bg-secondary text-foreground" : "bg-primary/10 text-primary",
+                    "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full",
+                    sent ? "bg-secondary text-foreground" : "text-primary",
                   )}
+                  style={!sent ? { background: "var(--status-approved-bg)" } : undefined}
                   aria-hidden="true"
                 >
                   {sent ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownLeft className="h-4 w-4" />}
+                  {/* Risk dot */}
+                  {riskDot && (
+                    <span
+                      className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-card"
+                      style={{ background: riskDot }}
+                      aria-label={`Risk score ${tx.risk_score}`}
+                    />
+                  )}
                 </div>
-                <div className="min-w-0 leading-tight">
-                  <p className="truncate text-sm font-medium text-foreground">{tx.recipient}</p>
-                  <p className="truncate text-xs text-muted-foreground">
+
+                {/* Info */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium text-foreground">{tx.recipient}</p>
+                    {/* Status badge */}
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                        sc.pulse && "animate-[status-pulse_2s_ease-in-out_infinite]",
+                      )}
+                      style={{ color: sc.color, background: sc.bg }}
+                    >
+                      {sc.icon}
+                      {sc.label}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
                     {tx.purpose} · {tx.date}
                   </p>
                 </div>
-              </div>
-              <div className="text-right leading-tight">
-                <p
-                  className={cn(
-                    "font-mono text-sm font-semibold",
-                    sent ? "text-foreground" : "text-primary",
-                  )}
+
+                {/* Amount + chevron */}
+                <div className="flex items-center gap-2">
+                  <p
+                    className={cn(
+                      "whitespace-nowrap font-mono text-sm font-semibold",
+                      sent ? "text-foreground" : "",
+                    )}
+                    style={!sent ? { color: "var(--status-approved)" } : undefined}
+                  >
+                    {sent ? "−" : "+"} RM {tx.amount.toFixed(2)}
+                  </p>
+                  <ChevronDown
+                    className={cn(
+                      "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200",
+                      isExpanded && "rotate-180",
+                    )}
+                    aria-hidden="true"
+                  />
+                </div>
+              </button>
+
+              {/* Expandable detail */}
+              {isExpanded && (
+                <div
+                  id={`tx-detail-${tx.id}`}
+                  className="border-t border-border bg-secondary/40 px-4 py-3"
+                  style={{ animation: "var(--animate-fade-in)" }}
                 >
-                  {sent ? "−" : "+"} RM {tx.amount.toFixed(2)}
-                </p>
-                <p className="text-xs text-muted-foreground capitalize">{tx.status}</p>
-              </div>
-            </li>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
+                    {/* Risk score */}
+                    <div>
+                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Risk Score</p>
+                      <div className="mt-1 flex items-center gap-2">
+                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
+                          <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(tx.risk_score, 100)}%`,
+                              background: tx.risk_score >= 70
+                                ? "var(--status-blocked)"
+                                : tx.risk_score >= 30
+                                  ? "var(--status-warned)"
+                                  : "var(--status-approved)",
+                            }}
+                          />
+                        </div>
+                        <span
+                          className="font-mono font-semibold"
+                          style={{
+                            color: tx.risk_score >= 70
+                              ? "var(--status-blocked)"
+                              : tx.risk_score >= 30
+                                ? "var(--status-warned)"
+                                : "var(--status-approved)",
+                          }}
+                        >
+                          {tx.risk_score}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Channel */}
+                    <div>
+                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Channel</p>
+                      <p className="mt-1 text-foreground">{tx.channel.replace(/_/g, " ")}</p>
+                    </div>
+
+                    {/* Decision */}
+                    <div>
+                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Decision</p>
+                      <p className="mt-1 text-foreground">{tx.decision}</p>
+                    </div>
+
+                    {/* Currency */}
+                    <div>
+                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Currency</p>
+                      <p className="mt-1 text-foreground">{tx.currency}</p>
+                    </div>
+                  </div>
+
+                  {/* Reason codes */}
+                  {tx.reason_codes.length > 0 && (
+                    <div className="mt-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Risk Signals</p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {tx.reason_codes.map((code) => (
+                          <span
+                            key={code}
+                            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[10px] font-medium"
+                            style={{ color: "var(--status-blocked)" }}
+                          >
+                            <span
+                              className="h-1 w-1 rounded-full"
+                              style={{ background: "var(--status-blocked)" }}
+                              aria-hidden="true"
+                            />
+                            {code.replace(/_/g, " ").toLowerCase()}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )
         })}
-      </ul>
+      </div>
     </Card>
   )
 }
