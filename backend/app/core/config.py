@@ -9,12 +9,14 @@ class Settings(BaseSettings):
     aws_region: str = "ap-southeast-1"
     aws_profile: str = ""
     neptune_endpoint: str = ""
-    use_mock_graph: bool = True
-    dev_user_id: str = "marcus"
+    use_mock_graph: bool = False
+    dev_user_id: str = "Eric Wong"
     warning_delay_seconds: int = 30
     api_cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
-    main_agent_model: str = "gemini-3.1-flash-lite-preview"
-    main_agent_model_provider: str = "google_genai"
+    main_agent_model: str = ""
+    # main_agent_model_provider: str = "google_genai"
+    main_agent_model_provider: str = "openai"
+    openai_api_key: str = ""
     google_api_key: str = ""
     gemini_api_key: str = ""
 

@@ -11,6 +11,7 @@ dependencies = [
     "fastapi[standard]>=0.136.1",
     "langchain-aws>=1.4.5",
     "langchain-google-genai>=4.2.2",
+    "langchain-openai>=0.3.35",
     "langgraph>=1.0.2",
     "pydantic-settings>=2.11.0",
 ]

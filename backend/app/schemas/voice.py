@@ -31,6 +31,7 @@ class VoiceTurnRequest(BaseModel):
 
 class VoiceDecisionRequest(BaseModel):
     thread_id: str = Field(min_length=1, max_length=128)
+    warning_id: str | None = Field(default=None, min_length=1, max_length=64)
     decision: Literal["approve", "reject"]
     purpose: str | None = Field(default=None, max_length=1000)
 

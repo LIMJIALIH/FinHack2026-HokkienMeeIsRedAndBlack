@@ -27,14 +27,14 @@ def create_app() -> FastAPI:
     logging.getLogger("google_genai.types").addFilter(_GoogleToolCallTextWarningFilter())
 
     graph_client = None
-    if settings.use_mock_graph:
-        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
-    elif settings.neptune_endpoint:
+    if settings.neptune_endpoint:
         graph_client = NeptuneRiskClient(
             endpoint=settings.neptune_endpoint,
             region=settings.aws_region,
             profile=settings.aws_profile or None,
         )
+    elif settings.use_mock_graph:
+        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
 
     risk_engine = RiskEngine(graph_client=graph_client)
 
@@ -51,7 +51,12 @@ def create_app() -> FastAPI:
     app.state.warning_store = InMemoryWarningStore()
     app.state.warning_delay_seconds = settings.warning_delay_seconds
     try:
-        api_key = settings.google_api_key or settings.gemini_api_key or None
+        provider = (settings.main_agent_model_provider or "").strip().lower()
+        api_key = None
+        if provider == "openai":
+            api_key = settings.openai_api_key or None
+        elif provider == "google_genai":
+            api_key = settings.google_api_key or settings.gemini_api_key or None
         app.state.main_agent = build_main_deep_agent(
             model=settings.main_agent_model,
             model_provider=settings.main_agent_model_provider,

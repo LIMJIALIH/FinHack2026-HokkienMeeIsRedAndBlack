@@ -95,6 +95,7 @@ def voice_decision(
             agent=agent,
             thread_id=payload.thread_id,
             decision=payload.decision,
+            warning_id=payload.warning_id,
             purpose=payload.purpose,
         )
     except Exception as exc:  # noqa: BLE001

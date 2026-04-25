@@ -55,14 +55,14 @@ def _emit_progress(status: str, detail: str) -> None:
 def _build_risk_engine() -> RiskEngine:
     settings = Settings()
     graph_client = None
-    if settings.use_mock_graph:
-        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
-    elif settings.neptune_endpoint:
+    if settings.neptune_endpoint:
         graph_client = NeptuneRiskClient(
             endpoint=settings.neptune_endpoint,
             region=settings.aws_region,
             profile=settings.aws_profile or None,
         )
+    elif settings.use_mock_graph:
+        graph_client = MockGraphRiskClient(assumed_user_id=settings.dev_user_id)
     return RiskEngine(graph_client=graph_client)
 
 
@@ -93,20 +93,6 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
     q = query.strip().lower()
     if not q:
         return {"query": query, "contacts": []}
-
-    if settings.use_mock_graph:
-        mock_contacts = [
-            {"user_id": "ali", "graph_id": "user:ali", "display_name": "Ali"},
-            {"user_id": "investment_agent", "graph_id": "user:investment_agent", "display_name": "Investment Agent"},
-            {"user_id": "siti", "graph_id": "user:siti", "display_name": "Siti"},
-            {"user_id": "ahmad", "graph_id": "user:ahmad", "display_name": "Ahmad"},
-        ]
-        ranked = [
-            contact
-            for contact in mock_contacts
-            if q in contact["display_name"].lower() or q in contact["user_id"]
-        ]
-        return {"query": query, "contacts": ranked[: max(1, int(limit))]}
 
     if settings.neptune_endpoint:
         try:
@@ -144,6 +130,20 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             return {"query": query, "contacts": [], "error": f"neptune_search_failed: {exc}"}
 
+    if settings.use_mock_graph:
+        mock_contacts = [
+            {"user_id": "ali", "graph_id": "user:ali", "display_name": "Ali"},
+            {"user_id": "investment_agent", "graph_id": "user:investment_agent", "display_name": "Investment Agent"},
+            {"user_id": "siti", "graph_id": "user:siti", "display_name": "Siti"},
+            {"user_id": "ahmad", "graph_id": "user:ahmad", "display_name": "Ahmad"},
+        ]
+        ranked = [
+            contact
+            for contact in mock_contacts
+            if q in contact["display_name"].lower() or q in contact["user_id"]
+        ]
+        return {"query": query, "contacts": ranked[: max(1, int(limit))]}
+
     return {"query": query, "contacts": []}
 
 
@@ -152,6 +152,35 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
     _emit_progress("checking_user_node", f"Reading User node {user_id}")
     settings = Settings()
     graph_id = _to_graph_user_id(user_id)
+
+    if settings.neptune_endpoint:
+        try:
+            client = _neptune_data_client(settings)
+            returns = ", ".join([f"u.`{field}` AS `{field}`" for field in USER_NODE_FIELDS])
+            cypher = f"MATCH (u:User {{`~id`: $user_id}}) RETURN {returns} LIMIT 1"
+            response = client.execute_open_cypher_query(
+                openCypherQuery=cypher,
+                parameters=json.dumps({"user_id": graph_id}),
+            )
+            rows = response.get("results", [])
+            return {
+                "user_id": user_id,
+                "graph_id": graph_id,
+                "schema": "(:User)",
+                "fields": USER_NODE_FIELDS,
+                "node": rows[0] if rows else None,
+                "source": "neptune",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "user_id": user_id,
+                "graph_id": graph_id,
+                "schema": "(:User)",
+                "fields": USER_NODE_FIELDS,
+                "node": None,
+                "source": "neptune",
+                "error": f"neptune_user_lookup_failed: {exc}",
+            }
 
     if settings.use_mock_graph:
         mock_users = {
@@ -225,35 +254,6 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
             "source": "mock",
         }
 
-    if settings.neptune_endpoint:
-        try:
-            client = _neptune_data_client(settings)
-            returns = ", ".join([f"u.`{field}` AS `{field}`" for field in USER_NODE_FIELDS])
-            cypher = f"MATCH (u:User {{`~id`: $user_id}}) RETURN {returns} LIMIT 1"
-            response = client.execute_open_cypher_query(
-                openCypherQuery=cypher,
-                parameters=json.dumps({"user_id": graph_id}),
-            )
-            rows = response.get("results", [])
-            return {
-                "user_id": user_id,
-                "graph_id": graph_id,
-                "schema": "(:User)",
-                "fields": USER_NODE_FIELDS,
-                "node": rows[0] if rows else None,
-                "source": "neptune",
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "user_id": user_id,
-                "graph_id": graph_id,
-                "schema": "(:User)",
-                "fields": USER_NODE_FIELDS,
-                "node": None,
-                "source": "neptune",
-                "error": f"neptune_user_lookup_failed: {exc}",
-            }
-
     return {"user_id": user_id, "graph_id": graph_id, "schema": "(:User)", "fields": USER_NODE_FIELDS, "node": None, "source": "none"}
 
 
@@ -268,6 +268,41 @@ def get_transfer_edges_info_tool(
     source_graph_id = _to_graph_user_id(source_user_id)
     target_graph_id = _to_graph_user_id(target_user_id)
     safe_limit = max(1, min(int(limit), 25))
+
+    if settings.neptune_endpoint:
+        try:
+            client = _neptune_data_client(settings)
+            returns = ", ".join([f"t.`{field}` AS `{field}`" for field in TRANSFER_EDGE_FIELDS])
+            cypher = (
+                "MATCH (u:User {`~id`: $source_id})-[t:TRANSFERRED_TO]->(r:User {`~id`: $target_id}) "
+                f"RETURN {returns} "
+                "ORDER BY t.tx_time DESC "
+                "LIMIT $limit"
+            )
+            response = client.execute_open_cypher_query(
+                openCypherQuery=cypher,
+                parameters=json.dumps(
+                    {"source_id": source_graph_id, "target_id": target_graph_id, "limit": safe_limit}
+                ),
+            )
+            return {
+                "source_user_id": source_user_id,
+                "target_user_id": target_user_id,
+                "schema": "(:User)-[:TRANSFERRED_TO]->(:User)",
+                "fields": TRANSFER_EDGE_FIELDS,
+                "edges": response.get("results", []),
+                "source": "neptune",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "source_user_id": source_user_id,
+                "target_user_id": target_user_id,
+                "schema": "(:User)-[:TRANSFERRED_TO]->(:User)",
+                "fields": TRANSFER_EDGE_FIELDS,
+                "edges": [],
+                "source": "neptune",
+                "error": f"neptune_edge_lookup_failed: {exc}",
+            }
 
     if settings.use_mock_graph:
         edges_by_pair = {
@@ -331,41 +366,6 @@ def get_transfer_edges_info_tool(
             "source": "mock",
         }
 
-    if settings.neptune_endpoint:
-        try:
-            client = _neptune_data_client(settings)
-            returns = ", ".join([f"t.`{field}` AS `{field}`" for field in TRANSFER_EDGE_FIELDS])
-            cypher = (
-                "MATCH (u:User {`~id`: $source_id})-[t:TRANSFERRED_TO]->(r:User {`~id`: $target_id}) "
-                f"RETURN {returns} "
-                "ORDER BY t.tx_time DESC "
-                "LIMIT $limit"
-            )
-            response = client.execute_open_cypher_query(
-                openCypherQuery=cypher,
-                parameters=json.dumps(
-                    {"source_id": source_graph_id, "target_id": target_graph_id, "limit": safe_limit}
-                ),
-            )
-            return {
-                "source_user_id": source_user_id,
-                "target_user_id": target_user_id,
-                "schema": "(:User)-[:TRANSFERRED_TO]->(:User)",
-                "fields": TRANSFER_EDGE_FIELDS,
-                "edges": response.get("results", []),
-                "source": "neptune",
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "source_user_id": source_user_id,
-                "target_user_id": target_user_id,
-                "schema": "(:User)-[:TRANSFERRED_TO]->(:User)",
-                "fields": TRANSFER_EDGE_FIELDS,
-                "edges": [],
-                "source": "neptune",
-                "error": f"neptune_edge_lookup_failed: {exc}",
-            }
-
     return {
         "source_user_id": source_user_id,
         "target_user_id": target_user_id,
@@ -381,23 +381,6 @@ def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) ->
     settings = Settings()
     safe_user_limit = max(1, min(int(user_limit), 20))
     safe_edge_limit = max(1, min(int(edge_limit), 20))
-
-    if settings.use_mock_graph:
-        return {
-            "source": "mock",
-            "counts": {"users": 4, "transfers": 3},
-            "sample_users": [
-                {"graph_id": "user:marcus", "name": "Marcus", "risk_tier_current": "low"},
-                {"graph_id": "user:ali", "name": "Ali", "risk_tier_current": "low"},
-                {"graph_id": "user:investment_agent", "name": "Investment Agent", "risk_tier_current": "high"},
-                {"graph_id": "user:siti", "name": "Siti", "risk_tier_current": "medium"},
-            ][:safe_user_limit],
-            "sample_transfers": [
-                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 12.5, "currency": "MYR"},
-                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 2.0, "currency": "MYR"},
-                {"source_id": "user:marcus", "target_id": "user:investment_agent", "amount": 1000.0, "currency": "MYR"},
-            ][:safe_edge_limit],
-        }
 
     if settings.neptune_endpoint:
         try:
@@ -450,6 +433,23 @@ def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) ->
                 "sample_transfers": [],
                 "error": f"neptune_overview_failed: {exc}",
             }
+
+    if settings.use_mock_graph:
+        return {
+            "source": "mock",
+            "counts": {"users": 4, "transfers": 3},
+            "sample_users": [
+                {"graph_id": "user:marcus", "name": "Marcus", "risk_tier_current": "low"},
+                {"graph_id": "user:ali", "name": "Ali", "risk_tier_current": "low"},
+                {"graph_id": "user:investment_agent", "name": "Investment Agent", "risk_tier_current": "high"},
+                {"graph_id": "user:siti", "name": "Siti", "risk_tier_current": "medium"},
+            ][:safe_user_limit],
+            "sample_transfers": [
+                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 12.5, "currency": "MYR"},
+                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 2.0, "currency": "MYR"},
+                {"source_id": "user:marcus", "target_id": "user:investment_agent", "amount": 1000.0, "currency": "MYR"},
+            ][:safe_edge_limit],
+        }
 
     return {
         "source": "none",

@@ -23,9 +23,11 @@ def _persist_transfer_or_503(
     risk_engine: RiskEngine,
     payload: TransferEvaluateRequest,
     risk: RiskCheckResult,
+    *,
+    requires_hitl: bool | None = None,
 ) -> str:
     try:
-        return risk_engine.persist_transfer(payload, risk)
+        return risk_engine.persist_transfer(payload, risk, requires_hitl=requires_hitl)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"transfer_graph_write_failed: {exc}") from exc
 
@@ -80,10 +82,18 @@ def transfer_llm_decision(
         risk_engine=risk_engine,
         payload=transaction_payload,
         risk=risk,
+        requires_hitl=True,
     )
 
     default_warning_delay_seconds = int(request.app.state.warning_delay_seconds)
-    warning_delay_seconds = default_warning_delay_seconds if risk.decision == "WARNING" else 0
+    if risk.decision == "WARNING":
+        warning_delay_seconds = default_warning_delay_seconds
+    elif risk.decision == "INTERVENTION_REQUIRED":
+        warning_delay_seconds = 0
+    else:
+        # APPROVED — no delay needed but still create a tracking record.
+        warning_delay_seconds = 0
+
     warning_state = _create_warning_state(
         payload=transaction_payload,
         risk=risk,
@@ -120,17 +130,21 @@ def transfer_evaluate(
         risk_engine=risk_engine,
         payload=payload,
         risk=risk,
+        requires_hitl=risk.decision != "APPROVED",
     )
 
-    default_warning_delay_seconds = int(request.app.state.warning_delay_seconds)
-    warning_delay_seconds = default_warning_delay_seconds if risk.decision == "WARNING" else 0
-    warning_state = _create_warning_state(
-        payload=payload,
-        risk=risk,
-        transaction_id=transaction_id,
-        delay_seconds=warning_delay_seconds,
-    )
-    warning_store.put(warning_state)
+    warning_state: WarningState | None = None
+    warning_delay_seconds: int | None = None
+    if risk.decision != "APPROVED":
+        default_warning_delay_seconds = int(request.app.state.warning_delay_seconds)
+        warning_delay_seconds = default_warning_delay_seconds if risk.decision == "WARNING" else 0
+        warning_state = _create_warning_state(
+            payload=payload,
+            risk=risk,
+            transaction_id=transaction_id,
+            delay_seconds=warning_delay_seconds,
+        )
+        warning_store.put(warning_state)
 
     return TransferEvaluateResponse(
         decision=risk.decision,
@@ -138,7 +152,7 @@ def transfer_evaluate(
         reason_codes=risk.reason_codes,
         evidence_refs=risk.evidence_refs,
         latency_ms=risk.latency_ms,
-        warning_id=warning_state.warning_id,
+        warning_id=warning_state.warning_id if warning_state else None,
         warning_delay_seconds=warning_delay_seconds,
     )
 

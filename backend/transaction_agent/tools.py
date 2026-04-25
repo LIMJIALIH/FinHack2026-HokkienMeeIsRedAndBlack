@@ -1,3 +1,10 @@
+"""Backend API client tools for transfer operations.
+
+These are thin HTTP wrappers that call the FastAPI backend.  They are
+**not** LangGraph graph tools — the agent's graph tools live in
+``graph_tools.py`` and ``agent.py`` (``execute_transfer``).
+"""
+
 import json
 import os
 from typing import Any
@@ -24,34 +31,6 @@ def _post_json(path: str, payload: dict[str, Any], timeout_seconds: float = 5.0)
         raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {err_body}") from exc
     except URLError as exc:
         raise RuntimeError(f"Connection error to {url}: {exc}") from exc
-
-
-def evaluate_transfer_tool(
-    user_id: str,
-    recipient_id: str,
-    amount: float,
-    message: str,
-    currency: str = "MYR",
-    channel: str = "voice_agent",
-    tx_note: str | None = None,
-    recipient_is_new: bool = False,
-    tx_time: str | None = None,
-    transaction_id: str | None = None,
-) -> dict[str, Any]:
-    """Evaluate a transfer for fraud risk and create/update graph transaction state."""
-    payload = {
-        "user_id": user_id,
-        "recipient_id": recipient_id,
-        "amount": amount,
-        "currency": currency,
-        "channel": channel,
-        "message": message,
-        "tx_note": tx_note,
-        "recipient_is_new": recipient_is_new,
-        "tx_time": tx_time,
-        "transaction_id": transaction_id,
-    }
-    return _post_json("/transfer/evaluate", payload=payload, timeout_seconds=8.0)
 
 
 def submit_llm_transfer_decision_tool(

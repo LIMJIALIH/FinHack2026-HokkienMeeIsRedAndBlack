@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { ScamInterventionModal } from "@/components/guardian/scam-modal"
+import { ScamInterventionCard } from "@/components/guardian/scam-modal"
 import type { Transaction } from "@/app/page"
 import { cn } from "@/lib/utils"
 
@@ -55,7 +55,7 @@ type VoiceTurnResponse = {
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
-const VOICE_USER_ID = process.env.NEXT_PUBLIC_VOICE_USER_ID ?? "marcus"
+const VOICE_USER_ID = process.env.NEXT_PUBLIC_VOICE_USER_ID ?? "Eric Wong"
 
 async function readVoiceStream(
   body: ReadableStream<Uint8Array>,
@@ -127,12 +127,18 @@ export function WalletView({
 
   const handleCancel = async () => {
     setErrorMessage(null)
+    setFlow("processing-scam")
     if (activeThreadId) {
       try {
         const response = await fetch(`${API_BASE_URL}/voice/decision`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ thread_id: activeThreadId, decision: "reject", purpose: transferPurpose }),
+          body: JSON.stringify({
+            thread_id: activeThreadId,
+            warning_id: reviewCard?.warning_id,
+            decision: "reject",
+            purpose: transferPurpose,
+          }),
         })
         if (!response.ok) {
           throw new Error("Unable to reject transfer decision.")
@@ -151,12 +157,18 @@ export function WalletView({
 
   const handleProceed = async () => {
     setErrorMessage(null)
+    setFlow("processing-scam")
     if (activeThreadId) {
       try {
         const response = await fetch(`${API_BASE_URL}/voice/decision`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ thread_id: activeThreadId, decision: "approve", purpose: transferPurpose }),
+          body: JSON.stringify({
+            thread_id: activeThreadId,
+            warning_id: reviewCard?.warning_id,
+            decision: "approve",
+            purpose: transferPurpose,
+          }),
         })
         if (!response.ok) {
           throw new Error("Unable to approve transfer decision.")
@@ -204,24 +216,6 @@ export function WalletView({
 
       if (payload.mode === "hitl_required" && payload.card) {
         setReviewCard(payload.card)
-        if (payload.card.decision_preview === "APPROVED") {
-          const approveResponse = await fetch(`${API_BASE_URL}/voice/decision`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ thread_id: payload.thread_id, decision: "approve" }),
-          })
-          if (!approveResponse.ok) {
-            throw new Error("Failed to finalize approved transfer.")
-          }
-          triggerSafe()
-          setTransferPrompt("")
-          setReviewCard(null)
-          setLatestAgentText("")
-          setTransferPurpose("")
-          setAgentStep(null)
-          setActiveThreadId(null)
-          return
-        }
         setFlow("scam-detected")
         return
       }
@@ -282,6 +276,11 @@ export function WalletView({
           transferPrompt={transferPrompt}
           setTransferPrompt={setTransferPrompt}
           onAnalyze={submitTransferToAgent}
+          reviewCard={reviewCard}
+          transferPurpose={transferPurpose}
+          setTransferPurpose={setTransferPurpose}
+          onCancelReview={handleCancel}
+          onProceedReview={handleProceed}
           errorMessage={errorMessage}
           agentStep={agentStep}
           latestAgentText={latestAgentText}
@@ -295,17 +294,6 @@ export function WalletView({
         <GuardianStatusCard />
         <QuickActionsCard />
       </div>
-
-      {/* Modal overlays */}
-      <ScamInterventionModal
-        open={flow === "scam-detected"}
-        card={reviewCard}
-        assistantText={latestAgentText}
-        purpose={transferPurpose}
-        onPurposeChange={setTransferPurpose}
-        onCancel={handleCancel}
-        onProceed={handleProceed}
-      />
 
       {flow === "success-safe" && (
         <div
@@ -374,6 +362,11 @@ function SimulationPanel({
   transferPrompt,
   setTransferPrompt,
   onAnalyze,
+  reviewCard,
+  transferPurpose,
+  setTransferPurpose,
+  onCancelReview,
+  onProceedReview,
   errorMessage,
   agentStep,
   latestAgentText,
@@ -382,6 +375,11 @@ function SimulationPanel({
   transferPrompt: string
   setTransferPrompt: (value: string) => void
   onAnalyze: () => void
+  reviewCard: TransferReviewCard | null
+  transferPurpose: string
+  setTransferPurpose: (value: string) => void
+  onCancelReview: () => void
+  onProceedReview: () => void
   errorMessage: string | null
   agentStep: string | null
   latestAgentText: string
@@ -427,6 +425,23 @@ function SimulationPanel({
           </div>
         </div>
 
+        {latestAgentText && (
+          <div className="mt-5 rounded-md border border-border bg-secondary px-3 py-2.5">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Latest agent message</p>
+            <p className="mt-1 text-sm leading-relaxed text-foreground">{latestAgentText}</p>
+          </div>
+        )}
+        {reviewCard && (
+          <ScamInterventionCard
+            card={reviewCard}
+            assistantText={latestAgentText}
+            purpose={transferPurpose}
+            onPurposeChange={setTransferPurpose}
+            onCancel={onCancelReview}
+            onProceed={onProceedReview}
+          />
+        )}
+
         <form
           className="mt-5 flex flex-col gap-2.5 md:flex-row"
           onSubmit={(event) => {
@@ -448,7 +463,7 @@ function SimulationPanel({
             ) : (
               <ShieldAlert className="h-4 w-4" aria-hidden="true" />
             )}
-            Analyze
+            Send
           </Button>
         </form>
       </div>
@@ -461,12 +476,6 @@ function SimulationPanel({
         >
           <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
           <p className="text-sm text-foreground">{agentStep ?? "Analysing transfer request"}</p>
-        </div>
-      )}
-      {!isBusy && latestAgentText && (
-        <div className="mt-5 rounded-md border border-border bg-secondary px-3 py-2.5">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Latest agent message</p>
-          <p className="mt-1 text-sm leading-relaxed text-foreground">{latestAgentText}</p>
         </div>
       )}
       {errorMessage && (

@@ -473,12 +473,19 @@ class RiskEngine:
             edges=edges,
         )
 
-    def persist_transfer(self, payload: TransferEvaluateRequest, result: RiskCheckResult) -> str:
+    def persist_transfer(
+        self,
+        payload: TransferEvaluateRequest,
+        result: RiskCheckResult,
+        *,
+        requires_hitl: bool | None = None,
+    ) -> str:
         if self._graph_client is None:
             raise RuntimeError("Graph client is not configured")
 
-        # Every transfer is explicitly user-approved through HITL before final execution.
-        status = "pending_hitl"
+        if requires_hitl is None:
+            requires_hitl = result.decision != "APPROVED"
+        status = "pending_hitl" if requires_hitl else "approved"
         tx_id = payload.transaction_id or f"tx:{uuid.uuid4().hex}"
         tx_time = payload.tx_time or datetime.now(tz=timezone.utc).isoformat()
         updated_at_epoch = int(time.time())
@@ -499,7 +506,7 @@ class RiskEngine:
             risk_score_latest=result.risk_score,
             risk_reason_codes=result.reason_codes,
             risk_decision=result.decision,
-            requires_hitl=True,
+            requires_hitl=requires_hitl,
             updated_at_epoch=updated_at_epoch,
         )
         return tx_id

@@ -99,7 +99,7 @@ export function FraudGraph() {
           headers: { "Content-Type": "application/json" },
           signal: abort.signal,
           body: JSON.stringify({
-            user_id: "marcus",
+            user_id: "Eric Wong",
             recipient_id: "investment_agent",
             amount: 1000,
             currency: "MYR",

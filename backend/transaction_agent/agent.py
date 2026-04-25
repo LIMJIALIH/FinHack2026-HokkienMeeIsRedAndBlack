@@ -1,56 +1,117 @@
+"""Transaction fraud-reasoning agent with LangGraph-native HITL via interrupt_on.
+
+The agent gathers evidence using read-only graph tools, then calls
+``execute_transfer`` when it's ready to move money.  ``interrupt_on``
+pauses the graph *before* execution so the human can approve / reject.
+"""
+
+import json
 import os
 import uuid
-from dataclasses import dataclass, field
 from collections.abc import Generator
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import Any
 
 from deepagents import create_deep_agent
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
-from pydantic import BaseModel, Field
+from langgraph.types import Command
 
 from transaction_agent.graph_tools import (
-    get_transfer_edges_info_tool,
     get_neptune_graph_overview_tool,
+    get_transfer_edges_info_tool,
     get_user_node_info_tool,
     search_contact_nodes_tool,
 )
-from transaction_agent.tools import confirm_warning_tool, submit_llm_transfer_decision_tool
+from transaction_agent.tools import submit_llm_transfer_decision_tool
 
 
-class LLMTransferDecision(BaseModel):
-    mode: Literal["transfer_decision", "message"] = "message"
-    assistant_text: str
-    card_type: Literal["none", "transfer_review"] = "none"
-    recipient_query: str | None = None
-    recipient_id: str | None = None
-    amount: float | None = Field(default=None, gt=0)
-    currency: str = "MYR"
-    message: str = ""
-    tx_note: str | None = None
-    decision: Literal["APPROVED", "WARNING", "INTERVENTION_REQUIRED"] | None = None
-    risk_score: int = Field(default=0, ge=0, le=100)
-    reason_codes: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
-    purpose_question: str = "What is this transaction for?"
+# ---------------------------------------------------------------------------
+# Execute-transfer tool (the *only* tool gated by interrupt_on)
+# ---------------------------------------------------------------------------
+
+def execute_transfer(
+    sender_user_id: str,
+    recipient_id: str,
+    amount: float,
+    currency: str = "MYR",
+    message: str = "",
+    tx_note: str | None = None,
+    risk_score: int = 0,
+    reason_codes: list[str] | None = None,
+    evidence_refs: list[str] | None = None,
+    assistant_text: str = "",
+) -> str:
+    """Execute a wallet transfer after human approval.
+
+    This tool will be **paused** by the HITL middleware before it runs.
+    The human sees the proposed arguments and can approve, edit, or reject.
+    Only upon approval does this function actually execute.
+
+    Args:
+        sender_user_id: The verified sender's user ID.
+        recipient_id: The resolved recipient's user ID.
+        amount: Transfer amount (must be > 0).
+        currency: ISO currency code (default MYR).
+        message: Free-text transfer message / purpose.
+        tx_note: Optional internal note.
+        risk_score: Agent's assessed risk score (0-100).
+        reason_codes: Machine-friendly risk reason labels.
+        evidence_refs: Concrete graph references backing the decision.
+        assistant_text: Agent's human-readable explanation of the transfer.
+
+    Returns:
+        JSON string with the persisted transfer result.
+    """
+    result = submit_llm_transfer_decision_tool(
+        user_id=sender_user_id,
+        recipient_id=recipient_id,
+        amount=amount,
+        message=message,
+        currency=currency,
+        tx_note=tx_note,
+        recipient_is_new=False,
+        decision="APPROVED",
+        risk_score=risk_score,
+        reason_codes=reason_codes or [],
+        evidence_refs=evidence_refs or [],
+    )
+    return json.dumps(result)
 
 
-@dataclass
-class PendingDecision:
-    warning_id: str
-    decision: str
-    user_id: str
-    transfer: dict[str, Any] = field(default_factory=dict)
-
+# ---------------------------------------------------------------------------
+# Agent runtime
+# ---------------------------------------------------------------------------
 
 @dataclass
 class MainAgentRuntime:
     agent: Any
-    pending_by_thread: dict[str, PendingDecision] = field(default_factory=dict)
+    """Compiled LangGraph agent with interrupt_on enabled."""
 
+
+# ---------------------------------------------------------------------------
+# Helpers — model resolution
+# ---------------------------------------------------------------------------
 
 def _model_name(model: str, model_provider: str) -> str:
     return model if ":" in model else f"{model_provider}:{model}"
+
+
+def _default_model_for_provider(model_provider: str) -> str:
+    defaults = {
+        "google_genai": "gemini-3.1-flash-lite-preview",
+        "openai": "gpt-5-nano",
+        "anthropic": "claude-3-5-haiku-latest",
+    }
+    return defaults.get(model_provider, "gpt-5-nano")
+
+
+def _resolve_model_name(model: str, model_provider: str) -> str:
+    candidate = (model or "").strip()
+    if not candidate:
+        candidate = _default_model_for_provider(model_provider)
+    return _model_name(model=candidate, model_provider=model_provider)
 
 
 def _set_provider_api_key(model_provider: str, api_key: str | None) -> None:
@@ -65,8 +126,12 @@ def _set_provider_api_key(model_provider: str, api_key: str | None) -> None:
         os.environ[env_name] = api_key
 
 
+# ---------------------------------------------------------------------------
+# Helpers — user / config
+# ---------------------------------------------------------------------------
+
 def _default_user_id() -> str:
-    return os.getenv("VOICE_AGENT_DEFAULT_USER_ID", "marcus")
+    return os.getenv("VOICE_AGENT_DEFAULT_USER_ID", "Eric Wong")
 
 
 def _resolve_user_id(user_id: str | None) -> str:
@@ -75,27 +140,29 @@ def _resolve_user_id(user_id: str | None) -> str:
 
 
 def _build_turn_payload(text: str, user_id: str) -> dict[str, Any]:
-    # Inject sender context so sender-side checks are explicit.
     content = f"sender_user_id={user_id}\nuser_request={text}"
     return {"messages": [{"role": "user", "content": content}]}
 
 
 def _resolve_recursion_limit() -> int:
-    raw = (os.getenv("MAIN_AGENT_RECURSION_LIMIT", "60") or "").strip()
+    raw = (os.getenv("MAIN_AGENT_RECURSION_LIMIT", "100") or "").strip()
     try:
         value = int(raw)
     except ValueError:
-        return 60
+        return 100
     return max(10, min(value, 500))
 
 
 def _runtime_config(thread_id: str) -> dict[str, Any]:
     return {
         "configurable": {"thread_id": thread_id},
-        # Standalone key per LangGraph docs (not nested under "configurable").
         "recursion_limit": _resolve_recursion_limit(),
     }
 
+
+# ---------------------------------------------------------------------------
+# Helpers — response building
+# ---------------------------------------------------------------------------
 
 def _error_payload(thread_id: str, message: str) -> dict[str, Any]:
     return {
@@ -110,52 +177,20 @@ def _error_payload(thread_id: str, message: str) -> dict[str, Any]:
     }
 
 
-def _build_review_card(result: dict[str, Any]) -> dict[str, Any]:
-    decision = result.get("decision", "WARNING")
-    warning_id = result.get("warning_id")
-    return {
-        "card_type": "transfer_review",
-        "title": "Review transfer risk",
-        "subtitle": "Please approve or reject this transfer.",
-        "decision_preview": decision,
-        "risk_score": int(result.get("risk_score", 0)),
-        "reason_codes": list(result.get("reason_codes", [])),
-        "evidence_refs": list(result.get("evidence_refs", [])),
-        "warning_id": warning_id,
-        "warning_delay_seconds": result.get("warning_delay_seconds"),
-        "purpose_question": result.get("purpose_question", "What is this transaction for?"),
-        "actions": [
-            {"action": "approve", "warning_id": warning_id, "label": "Approve"},
-            {"action": "reject", "warning_id": warning_id, "label": "Reject"},
-        ],
-    }
-
-
-def _decision_from_result(result: dict[str, Any]) -> LLMTransferDecision:
-    raw = result.get("structured_response")
-    if raw is None:
-        raise ValueError("missing_structured_response")
-    if isinstance(raw, LLMTransferDecision):
-        return raw
-    if isinstance(raw, dict):
-        return LLMTransferDecision.model_validate(raw)
-    if isinstance(raw, BaseModel):
-        return LLMTransferDecision.model_validate(raw.model_dump())
-    raise ValueError("invalid_structured_response")
-
-
 def _summarize_tool_name(name: str) -> str:
     return {
         "search_contact_nodes_tool": "Finding matching contacts",
         "get_user_node_info_tool": "Checking user node details",
         "get_transfer_edges_info_tool": "Checking transfer edge history",
         "get_neptune_graph_overview_tool": "Checking graph overview",
+        "execute_transfer": "Preparing transfer for approval",
     }.get(name, f"Running {name}")
 
 
-def _collect_action_steps(result: dict[str, Any]) -> list[str]:
+def _collect_action_steps(messages: list[Any]) -> list[str]:
+    """Extract human-readable step summaries from tool calls in message history."""
     steps: list[str] = []
-    for message in result.get("messages", []):
+    for message in messages:
         for tool_call in getattr(message, "tool_calls", []) or []:
             name = tool_call.get("name", "")
             summary = _summarize_tool_name(name)
@@ -166,129 +201,255 @@ def _collect_action_steps(result: dict[str, Any]) -> list[str]:
     return steps
 
 
-def _stream_part(chunk: Any) -> tuple[str | None, dict[str, Any] | None]:
-    if isinstance(chunk, dict):
-        chunk_type = chunk.get("type")
-        data = chunk.get("data")
-        return (chunk_type if isinstance(chunk_type, str) else None, data if isinstance(data, dict) else None)
-
-    # Compatibility with pre-v2 tuple streams, or adapters that still return
-    # nested tuples despite version="v2".
-    if isinstance(chunk, tuple):
-        if len(chunk) == 2 and isinstance(chunk[0], str):
-            data = chunk[1]
-            return chunk[0], data if isinstance(data, dict) else None
-        if len(chunk) == 2 and isinstance(chunk[1], tuple):
-            nested = chunk[1]
-            if len(nested) == 2 and isinstance(nested[0], str):
-                data = nested[1]
-                return nested[0], data if isinstance(data, dict) else None
-        if len(chunk) == 3 and isinstance(chunk[1], str):
-            data = chunk[2]
-            return chunk[1], data if isinstance(data, dict) else None
-
-    return None, None
+def _extract_last_assistant_text(messages: list[Any]) -> str:
+    """Return the text content of the last AIMessage in the conversation."""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                text_parts = [
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                ]
+                joined = " ".join(text_parts).strip()
+                if joined:
+                    return joined
+    return ""
 
 
-def _response_from_agent_decision(
+def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """Build a transfer review card from the interrupted execute_transfer args."""
+    risk_score = int(tool_args.get("risk_score", 0))
+    reason_codes = list(tool_args.get("reason_codes") or [])
+
+    # Derive decision preview from risk score for frontend display.
+    if risk_score >= 70:
+        decision_preview = "INTERVENTION_REQUIRED"
+    elif risk_score >= 30 or reason_codes:
+        decision_preview = "WARNING"
+    else:
+        decision_preview = "APPROVED"
+
+    return {
+        "card_type": "transfer_review",
+        "title": "Review transfer",
+        "subtitle": (
+            f"Transfer {tool_args.get('amount', 0):.2f} "
+            f"{tool_args.get('currency', 'MYR')} "
+            f"to {tool_args.get('recipient_id', 'unknown')}"
+        ),
+        "decision_preview": decision_preview,
+        "risk_score": risk_score,
+        "reason_codes": reason_codes,
+        "evidence_refs": list(tool_args.get("evidence_refs") or []),
+        "warning_id": None,
+        "warning_delay_seconds": None,
+        "purpose_question": "What is this transaction for?",
+        "actions": [
+            {"action": "approve", "warning_id": None, "label": "Approve"},
+            {"action": "reject", "warning_id": None, "label": "Reject"},
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Build the deep agent
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+ROLE
+You are a transaction fraud reasoning agent for wallet transfers.
+
+PRIMARY OBJECTIVE
+Given sender context and a user transfer request, gather evidence from the graph
+and, when ready, call the execute_transfer tool to perform the transfer.
+Prioritize fraud prevention and correctness over speed.
+Never invent facts, tools, IDs, or graph evidence.
+
+INPUT CONTRACT
+Each turn includes:
+- sender_user_id
+- user_request
+Always treat sender_user_id as the sender identity for all sender-side checks.
+
+AVAILABLE TOOLS
+Read-only (always auto-approved):
+- search_contact_nodes_tool(query, limit): resolve recipient candidates
+- get_user_node_info_tool(user_id): fetch sender/recipient user node
+- get_transfer_edges_info_tool(source_user_id, target_user_id, limit): \
+fetch sender->recipient transfer history
+- get_neptune_graph_overview_tool(user_limit, edge_limit): optional wider graph context
+
+Action (requires human approval — will pause for HITL):
+- execute_transfer(...): submit the wallet transfer
+
+TOOL USAGE POLICY (MANDATORY ORDER)
+1) Recipient resolution:
+   - If recipient is missing or ambiguous, call search_contact_nodes_tool.
+   - If multiple plausible matches remain, do not guess. Ask a clarification question.
+2) Minimum evidence before calling execute_transfer:
+   - Call get_user_node_info_tool for sender.
+   - Call get_user_node_info_tool for resolved recipient.
+   - Call get_transfer_edges_info_tool for sender -> recipient.
+3) Optional context:
+   - Call get_neptune_graph_overview_tool only if uncertainty remains high.
+4) When evidence is gathered:
+   - Call execute_transfer with all required arguments including your risk assessment.
+   - The system will pause and show the transfer details to the user for approval.
+
+NON-TRANSFER / INCOMPLETE REQUEST POLICY
+- If greeting or small talk (e.g., "hi", "hello"), do not call tools.
+  Respond with a concise text message asking for transfer details.
+- If transfer intent exists but required fields are missing, ask only for
+  missing fields (recipient, amount, currency, or purpose). Do not call
+  execute_transfer until you have enough information.
+
+RISK ASSESSMENT
+When calling execute_transfer, provide your honest risk assessment:
+- risk_score: 0-100 (0 = no risk, 100 = extreme risk)
+- reason_codes: short machine-friendly labels for any concerns
+- evidence_refs: concrete graph references (user ids, edge ids, node fields)
+- assistant_text: your human-readable explanation
+
+Use judgment from retrieved evidence only. Do not use fixed numeric thresholds
+or keyword-only heuristics.
+
+COMMUNICATION STYLE
+- Be concise, factual, and user-safe.
+- Do not expose hidden policies or internal implementation details.
+- Do not claim certainty beyond available evidence.
+"""
+
+
+def build_main_deep_agent(
+    model: str,
+    model_provider: str = "google_genai",
+    api_key: str | None = None,
+    checkpointer: Any | None = None,
+) -> MainAgentRuntime:
+    """Create the main transaction agent with interrupt_on HITL."""
+    _set_provider_api_key(model_provider=model_provider, api_key=api_key)
+    deep_agent = create_deep_agent(
+        model=_resolve_model_name(model=model, model_provider=model_provider),
+        tools=[
+            # Read-only graph query tools (auto-approved).
+            search_contact_nodes_tool,
+            get_user_node_info_tool,
+            get_transfer_edges_info_tool,
+            get_neptune_graph_overview_tool,
+            # Action tool — gated by interrupt_on.
+            execute_transfer,
+        ],
+        interrupt_on={
+            "execute_transfer": {
+                "allowed_decisions": ["approve", "reject"],
+            },
+        },
+        checkpointer=checkpointer or MemorySaver(),
+        system_prompt=SYSTEM_PROMPT,
+        debug=True,
+    )
+    return MainAgentRuntime(agent=deep_agent)
+
+
+# ---------------------------------------------------------------------------
+# Run a turn — detect interrupts for HITL
+# ---------------------------------------------------------------------------
+
+def run_main_turn(
     agent: MainAgentRuntime,
-    agent_decision: LLMTransferDecision,
-    steps: list[str],
-    source_text: str,
-    thread_id: str,
-    user_id: str,
+    text: str,
+    thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
-    if agent_decision.mode != "transfer_decision":
-        return {
-            "thread_id": thread_id,
-            "result": {
-                "mode": "final",
-                "assistant_text": agent_decision.assistant_text,
-                "card": None,
-                "backend_status": "NEED_MORE_INFO",
-                "steps": steps,
-            },
-            "hitl": None,
-        }
+    """Run a single user turn through the agent.
 
-    if agent_decision.amount is None or not agent_decision.recipient_id or agent_decision.decision is None:
-        return {
-            "thread_id": thread_id,
-            "result": {
-                "mode": "final",
-                "assistant_text": agent_decision.assistant_text or "Who do you want to transfer to, and how much?",
-                "card": None,
-                "backend_status": "NEED_MORE_INFO",
-                "steps": steps,
-            },
-            "hitl": None,
-        }
+    If the agent calls ``execute_transfer``, the graph pauses (interrupt_on)
+    and this function returns a ``hitl_required`` response with a review card
+    built from the tool call arguments.
+
+    If no transfer tool is called (e.g. a greeting or follow-up question),
+    the graph completes normally and a ``final`` response is returned.
+    """
+    resolved_thread_id = thread_id or str(uuid.uuid4())
+    resolved_user_id = _resolve_user_id(user_id)
+    config = _runtime_config(resolved_thread_id)
 
     try:
-        risk_result = submit_llm_transfer_decision_tool(
-            user_id=user_id,
-            recipient_id=agent_decision.recipient_id,
-            amount=float(agent_decision.amount),
-            message=agent_decision.message or source_text,
-            currency=agent_decision.currency or "MYR",
-            tx_note=agent_decision.tx_note,
-            recipient_is_new=False,
-            decision=agent_decision.decision,
-            risk_score=agent_decision.risk_score,
-            reason_codes=agent_decision.reason_codes,
-            evidence_refs=agent_decision.evidence_refs,
+        agent.agent.invoke(
+            _build_turn_payload(text=text, user_id=resolved_user_id),
+            config=config,
+        )
+    except GraphRecursionError:
+        return _error_payload(
+            resolved_thread_id,
+            "Request took too many reasoning steps. "
+            "Please rephrase with transfer details (recipient and amount).",
         )
     except Exception as exc:  # noqa: BLE001
-        return _error_payload(thread_id, f"Unable to persist transfer decision right now: {exc}")
-
-    persisted_decision = str(risk_result.get("decision", "WARNING"))
-    warning_id = risk_result.get("warning_id")
-    if persisted_decision in {"WARNING", "INTERVENTION_REQUIRED"}:
-        if not isinstance(warning_id, str) or not warning_id.strip():
-            return _error_payload(
-                thread_id,
-                "Transfer flagged as risky but warning tracking id is missing. Transfer was not finalized.",
-            )
-        risk_result["purpose_question"] = agent_decision.purpose_question
-        agent.pending_by_thread[thread_id] = PendingDecision(
-            warning_id=warning_id,
-            decision=persisted_decision,
-            user_id=user_id,
-            transfer={
-                "recipient_id": agent_decision.recipient_id,
-                "amount": agent_decision.amount,
-                "currency": agent_decision.currency,
-                "message": agent_decision.message,
-            },
+        return _error_payload(
+            resolved_thread_id,
+            f"Unable to process transfer request: {exc}",
         )
-        return {
-            "thread_id": thread_id,
-            "result": {
-                "mode": "hitl_required",
-                "assistant_text": agent_decision.assistant_text or "Risk detected. Please approve or reject this transfer.",
-                "card": _build_review_card(risk_result),
-                "backend_status": "HITL_REQUIRED",
-                "steps": steps,
-            },
-            "hitl": {
-                "state": "pending",
-                "decision_preview": persisted_decision,
-                "warning_id": warning_id,
-            },
-        }
 
-    if isinstance(warning_id, str):
-        try:
-            backend_status = confirm_warning_tool(warning_id=warning_id, confirmed=True).get(
-                "status",
-                "APPROVED",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _error_payload(thread_id, f"Transfer risk checked but finalize step failed: {exc}")
-    else:
-        backend_status = "APPROVED"
+    # Check whether the graph paused at execute_transfer.
+    return _build_response_from_state(agent, resolved_thread_id, config)
 
-    assistant_text = agent_decision.assistant_text.strip() or "Transfer approved."
+
+def _build_response_from_state(
+    agent: MainAgentRuntime,
+    thread_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Inspect the graph state and return the appropriate response payload."""
+    state = agent.agent.get_state(config)
+    messages = state.values.get("messages", [])
+    steps = _collect_action_steps(messages)
+
+    # --- Interrupted → HITL required ----------------------------------
+    if state.tasks:
+        for task in state.tasks:
+            for intr in task.interrupts:
+                interrupt_value = intr.value
+                # The HumanInTheLoopMiddleware wraps the interrupt as a
+                # HITLRequest dict with action_requests / review_configs.
+                tool_args = _extract_tool_args_from_interrupt(
+                    interrupt_value, messages
+                )
+                if tool_args is not None:
+                    assistant_text = (
+                        tool_args.get("assistant_text", "").strip()
+                        or _extract_last_assistant_text(messages)
+                        or "Please review and approve this transfer."
+                    )
+                    return {
+                        "thread_id": thread_id,
+                        "result": {
+                            "mode": "hitl_required",
+                            "assistant_text": assistant_text,
+                            "card": _build_review_card(tool_args),
+                            "backend_status": "HITL_REQUIRED",
+                            "steps": steps,
+                        },
+                        "hitl": {"state": "pending"},
+                    }
+
+    # --- No interrupt → final response --------------------------------
+    assistant_text = (
+        _extract_last_assistant_text(messages)
+        or "Transfer complete."
+    )
+
+    # Determine backend status based on whether execute_transfer ran.
+    has_transfer_result = any(
+        getattr(m, "name", None) == "execute_transfer"
+        for m in messages
+        if not isinstance(m, AIMessage)
+    )
+    backend_status = "APPROVED" if has_transfer_result else "NEED_MORE_INFO"
+
     return {
         "thread_id": thread_id,
         "result": {
@@ -302,88 +463,81 @@ def _response_from_agent_decision(
     }
 
 
-def build_main_deep_agent(
-    model: str,
-    model_provider: str = "google_genai",
-    api_key: str | None = None,
-) -> MainAgentRuntime:
-    _set_provider_api_key(model_provider=model_provider, api_key=api_key)
-    deep_agent = create_deep_agent(
-        model=_model_name(model=model, model_provider=model_provider),
-        tools=[
-            search_contact_nodes_tool,
-            get_user_node_info_tool,
-            get_transfer_edges_info_tool,
-            get_neptune_graph_overview_tool,
-        ],
-        response_format=LLMTransferDecision,
-        checkpointer=MemorySaver(),
-        system_prompt=(
-            "You are an LLM-based transaction fraud reasoning agent for wallet transfers. "
-            "Do not use fixed scoring rules, threshold formulas, or keyword heuristics. "
-            "Use the available graph tools dynamically and base your decision on the evidence they return. "
-            "The graph schema is exactly: User node (:User) with fields ~id, name, balance, "
-            "ekyc_status, ekyc_level, hashed_phone, hashed_ic, risk_tier_current, summary_text_latest, summary_updated_at, "
-            "summary_agent_version, created_at, updated_at; and transaction edge "
-            "(:User)-[:TRANSFERRED_TO]->(:User) with fields ~id, tx_time, amount, currency, "
-            "message_text, tx_note, channel, status, finbert_score, emotion_score, risk_score_latest, "
-            "risk_reason_codes, updated_at. "
-            "Each user turn includes sender_user_id in the message. Always use sender_user_id for sender checks "
-            "and as source_user_id for transfer edge history checks. "
-            "For any transfer request, extract recipient, amount, currency, and message/purpose. "
-            "Call search_contact_nodes_tool when the recipient is named or ambiguous. "
-            "Call get_user_node_info_tool for the sender and recipient before deciding. "
-            "Call get_transfer_edges_info_tool for sender-to-recipient edge history before deciding. "
-            "Call get_neptune_graph_overview_tool when broader graph context is needed. "
-            "If you cannot identify a transfer or required details are missing, return mode='message' "
-            "with a concise assistant_text asking only for the missing information. "
-            "If the transfer is clear, return mode='transfer_decision', recipient_id, amount, currency, "
-            "decision, risk_score, reason_codes, evidence_refs, and assistant_text. "
-            "Use decision APPROVED only when the evidence looks normal; WARNING for suspicious but user-resolvable "
-            "risk; INTERVENTION_REQUIRED for high confidence fraud indicators. "
-            "When decision is WARNING or INTERVENTION_REQUIRED, set card_type='transfer_review' and ask "
-            "'What is this transaction for?' through purpose_question. "
-            "Reason from graph/user/edge facts and uncertainty. Never mention hidden rules."
-        ),
-    )
-    return MainAgentRuntime(agent=deep_agent)
+def _extract_tool_args_from_interrupt(
+    interrupt_value: Any, messages: list[Any]
+) -> dict[str, Any] | None:
+    """Extract execute_transfer args from the HITL interrupt payload.
+
+    The ``HumanInTheLoopMiddleware`` wraps interrupts as a dict with
+    ``action_requests`` — each containing ``name`` and ``args``.  We look
+    for the ``execute_transfer`` action and return its args.
+
+    Falls back to extracting from the last AIMessage tool_calls if the
+    interrupt structure is unrecognised.
+    """
+    # Standard HITLRequest structure from HumanInTheLoopMiddleware.
+    if isinstance(interrupt_value, dict):
+        for action in interrupt_value.get("action_requests", []):
+            if isinstance(action, dict) and action.get("name") == "execute_transfer":
+                return action.get("args", {})
+
+    # Fallback: extract from the last AI message's tool_calls.
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            for tc in msg.tool_calls or []:
+                if tc.get("name") == "execute_transfer":
+                    return tc.get("args", {})
+            break
+
+    return None
 
 
-def run_main_turn(
+# ---------------------------------------------------------------------------
+# Resume after HITL decision
+# ---------------------------------------------------------------------------
+
+def resume_main_hitl(
     agent: MainAgentRuntime,
-    text: str,
-    thread_id: str | None = None,
-    user_id: str | None = None,
+    thread_id: str,
+    decision: str,
+    warning_id: str | None = None,
+    purpose: str | None = None,
 ) -> dict[str, Any]:
-    resolved_thread_id = thread_id or str(uuid.uuid4())
-    resolved_user_id = _resolve_user_id(user_id)
-    config = _runtime_config(resolved_thread_id)
+    """Resume the paused graph after a human approve/reject decision.
+
+    Uses ``Command(resume=...)`` with the ``HumanInTheLoopMiddleware``
+    decision format to either execute the transfer or reject it.
+    """
+    config = _runtime_config(thread_id)
+
+    # Verify there's actually a pending interrupt.
+    state = agent.agent.get_state(config)
+    if not state.tasks:
+        return _error_payload(thread_id, "No pending transfer decision for this thread.")
+
+    if decision == "approve":
+        resume_value = {"decisions": [{"type": "approve"}]}
+    else:
+        reject_msg = "User rejected the transfer."
+        if purpose:
+            reject_msg = f"User rejected the transfer. Reason: {purpose}"
+        resume_value = {
+            "decisions": [{"type": "reject", "message": reject_msg}],
+        }
 
     try:
-        llm_result = agent.agent.invoke(
-            _build_turn_payload(text=text, user_id=resolved_user_id),
-            config=config,
-            version="v2",
-        )
-        agent_decision = _decision_from_result(llm_result)
-        steps = _collect_action_steps(llm_result)
+        agent.agent.invoke(Command(resume=resume_value), config=config)
     except GraphRecursionError:
-        return _error_payload(
-            resolved_thread_id,
-            "Request took too many reasoning steps. Please rephrase with transfer details (recipient and amount).",
-        )
+        return _error_payload(thread_id, "Transfer processing exceeded step limit.")
     except Exception as exc:  # noqa: BLE001
-        return _error_payload(resolved_thread_id, f"Unable to parse transfer intent: {exc}")
+        return _error_payload(thread_id, f"Unable to process decision: {exc}")
 
-    return _response_from_agent_decision(
-        agent=agent,
-        agent_decision=agent_decision,
-        steps=steps,
-        source_text=text,
-        thread_id=resolved_thread_id,
-        user_id=resolved_user_id,
-    )
+    return _build_response_from_state(agent, thread_id, config)
 
+
+# ---------------------------------------------------------------------------
+# Streaming wrapper
+# ---------------------------------------------------------------------------
 
 def run_main_turn_stream_events(
     agent: MainAgentRuntime,
@@ -391,135 +545,14 @@ def run_main_turn_stream_events(
     thread_id: str | None = None,
     user_id: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
+    """Yield SSE-compatible events for a single user turn."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
-    resolved_user_id = _resolve_user_id(user_id)
-    config = _runtime_config(resolved_thread_id)
-    llm_result: dict[str, Any] = {}
-    steps: list[str] = []
-
-    def emit_step(summary: str) -> dict[str, Any] | None:
-        if summary in steps:
-            return None
-        steps.append(summary)
-        return {"event": "step", "summary": summary}
-
-    first = emit_step("Analysing transfer request")
-    if first:
-        yield first
-
-    try:
-        for chunk in agent.agent.stream(
-            _build_turn_payload(text=text, user_id=resolved_user_id),
-            config=config,
-            stream_mode=["updates", "custom"],
-            subgraphs=True,
-            version="v2",
-        ):
-            chunk_type, data = _stream_part(chunk)
-            if chunk_type == "custom" and isinstance(data, dict):
-                detail = data.get("detail") or data.get("status")
-                if isinstance(detail, str):
-                    event = emit_step(detail)
-                    if event:
-                        yield event
-                continue
-
-            if chunk_type != "updates" or not isinstance(data, dict):
-                continue
-
-            for node_name, update in data.items():
-                if node_name == "tools":
-                    event = emit_step("Checking graph evidence")
-                    if event:
-                        yield event
-                elif node_name == "model_request":
-                    event = emit_step("Reasoning over graph signals")
-                    if event:
-                        yield event
-                if isinstance(update, dict):
-                    llm_result.update(update)
-
-        if "structured_response" not in llm_result and hasattr(agent.agent, "get_state"):
-            state = agent.agent.get_state(config)
-            values = getattr(state, "values", None)
-            if isinstance(values, dict):
-                llm_result.update(values)
-
-        agent_decision = _decision_from_result(llm_result)
-        if not any(step.startswith("Finding") or step.startswith("Checking") for step in steps):
-            steps.extend(_collect_action_steps(llm_result))
-        result = _response_from_agent_decision(
-            agent=agent,
-            agent_decision=agent_decision,
-            steps=steps,
-            source_text=text,
-            thread_id=resolved_thread_id,
-            user_id=resolved_user_id,
-        )
-    except GraphRecursionError:
-        result = _error_payload(
-            resolved_thread_id,
-            "Request took too many reasoning steps. Please rephrase with transfer details (recipient and amount).",
-        )
-    except Exception as exc:  # noqa: BLE001
-        result = _error_payload(resolved_thread_id, f"Unable to parse transfer intent: {exc}")
-
+    yield {"event": "step", "summary": "Analysing transfer request"}
+    yield {"event": "step", "summary": "Reasoning over graph signals"}
+    result = run_main_turn(
+        agent=agent,
+        text=text,
+        thread_id=resolved_thread_id,
+        user_id=user_id,
+    )
     yield {"event": "final", "payload": result}
-
-
-def resume_main_hitl(agent: MainAgentRuntime, thread_id: str, decision: str, purpose: str | None = None) -> dict[str, Any]:
-    pending = agent.pending_by_thread.get(thread_id)
-    if pending is None:
-        return _error_payload(thread_id, "No pending transfer decision for this thread.")
-    if purpose:
-        pending.transfer["user_purpose"] = purpose
-
-    should_confirm = decision == "approve"
-    try:
-        result = confirm_warning_tool(warning_id=pending.warning_id, confirmed=should_confirm)
-    except Exception as exc:  # noqa: BLE001
-        return _error_payload(thread_id, f"Unable to process decision right now: {exc}")
-
-    backend_status = str(result.get("status", "ERROR"))
-    if backend_status != "PENDING_DELAY":
-        agent.pending_by_thread.pop(thread_id, None)
-
-    wait_seconds_remaining = result.get("wait_seconds_remaining")
-    if backend_status == "PENDING_DELAY":
-        wait_text = f" Please wait {wait_seconds_remaining}s and try again." if wait_seconds_remaining is not None else ""
-        return {
-            "thread_id": thread_id,
-            "result": {
-                "mode": "hitl_required",
-                "assistant_text": f"Cooling-off delay is still active.{wait_text}",
-                "card": {
-                    "card_type": "transfer_review",
-                    "title": "Cooling-off delay active",
-                    "subtitle": "You can retry approval after the delay.",
-                    "decision_preview": pending.decision,
-                    "risk_score": 0,
-                    "reason_codes": [],
-                    "evidence_refs": [],
-                    "warning_id": pending.warning_id,
-                    "warning_delay_seconds": wait_seconds_remaining,
-                    "actions": [
-                        {"action": "approve", "warning_id": pending.warning_id, "label": "Approve"},
-                        {"action": "reject", "warning_id": pending.warning_id, "label": "Reject"},
-                    ],
-                },
-                "backend_status": backend_status,
-            },
-            "hitl": {"state": "pending", "warning_id": pending.warning_id},
-        }
-
-    assistant_text = "Transfer approved." if should_confirm else "Transfer cancelled."
-    return {
-        "thread_id": thread_id,
-        "result": {
-            "mode": "final",
-            "assistant_text": assistant_text,
-            "card": None,
-            "backend_status": backend_status,
-        },
-        "hitl": None,
-    }
