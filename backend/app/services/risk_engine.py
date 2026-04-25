@@ -4,9 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import NotRequired, TypedDict
 
-import boto3
 from botocore.config import Config
-from botocore.exceptions import ProfileNotFound
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.transfer import (
@@ -17,6 +15,7 @@ from app.schemas.transfer import (
     RiskGraphStats,
     TransferEvaluateRequest,
 )
+from app.services.aws_session import build_boto3_session
 
 
 class FlowState(TypedDict):
@@ -83,10 +82,7 @@ def _display_name(graph_id: str) -> str:
 
 class NeptuneRiskClient:
     def __init__(self, endpoint: str, region: str, profile: str | None) -> None:
-        try:
-            session = boto3.Session(profile_name=profile or None, region_name=region)
-        except ProfileNotFound:
-            session = boto3.Session(region_name=region)
+        session = build_boto3_session(region=region, profile=profile)
         self._client = session.client(
             "neptunedata",
             endpoint_url=f"https://{endpoint}:8182",
@@ -398,13 +394,14 @@ class RiskEngine:
         result: RiskCheckResult,
         *,
         requires_hitl: bool | None = None,
+        status_override: str | None = None,
     ) -> str:
         if self._graph_client is None:
             raise RuntimeError("Graph client is not configured")
 
         if requires_hitl is None:
             requires_hitl = result.decision != "APPROVED"
-        status = "pending_hitl" if requires_hitl else "approved"
+        status = status_override or ("pending_hitl" if requires_hitl else "approved")
         tx_id = payload.transaction_id or f"tx:{uuid.uuid4().hex}"
         tx_time = payload.tx_time or datetime.now(tz=timezone.utc).isoformat()
         updated_at_epoch = int(time.time())

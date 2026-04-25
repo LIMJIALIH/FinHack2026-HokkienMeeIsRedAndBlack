@@ -1,13 +1,12 @@
 import json
 from typing import Any
 
-import boto3
 from botocore.config import Config
-from botocore.exceptions import ProfileNotFound
 from langgraph.config import get_stream_writer
 
 from app.core.config import Settings
 from app.schemas.transfer import TransferEvaluateRequest
+from app.services.aws_session import build_boto3_session
 from app.services.risk_engine import NeptuneRiskClient, RiskEngine
 
 
@@ -94,13 +93,10 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
 
     if settings.neptune_endpoint:
         try:
-            try:
-                session = boto3.Session(
-                    profile_name=settings.aws_profile or None,
-                    region_name=settings.aws_region,
-                )
-            except ProfileNotFound:
-                session = boto3.Session(region_name=settings.aws_region)
+            session = build_boto3_session(
+                region=settings.aws_region,
+                profile=settings.aws_profile or None,
+            )
 
             client = session.client(
                 "neptunedata",
@@ -311,13 +307,10 @@ def _to_graph_user_id(user_id: str) -> str:
 
 
 def _neptune_data_client(settings: Settings):
-    try:
-        session = boto3.Session(
-            profile_name=settings.aws_profile or None,
-            region_name=settings.aws_region,
-        )
-    except ProfileNotFound:
-        session = boto3.Session(region_name=settings.aws_region)
+    session = build_boto3_session(
+        region=settings.aws_region,
+        profile=settings.aws_profile or None,
+    )
 
     return session.client(
         "neptunedata",

@@ -4,7 +4,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from app.api.dependencies import get_flow_graph, get_risk_engine, get_warning_store
+from app.api.dependencies import get_flow_graph, get_risk_engine, get_wallet_ledger, get_warning_store
+from app.core.auth import get_current_user_id
 from app.schemas.transfer import (
     LlmTransferDecisionRequest,
     RiskCheckResult,
@@ -15,6 +16,13 @@ from app.schemas.transfer import (
 )
 from app.services.warnings import InMemoryWarningStore, WarningState
 from app.services.risk_engine import RiskEngine
+from app.services.wallet_ledger import (
+    InsufficientBalanceError,
+    UserNotFoundError,
+    WalletLedger,
+    WalletSettlementError,
+    WalletSettlementResult,
+)
 
 router = APIRouter()
 
@@ -54,6 +62,8 @@ def _create_warning_state(
         transaction_id=transaction_id,
         user_id=payload.user_id,
         recipient_id=payload.recipient_id,
+        amount=payload.amount,
+        currency=payload.currency,
         created_at=time.time(),
         decision=risk.decision,
         risk_score=risk.risk_score,
@@ -63,13 +73,42 @@ def _create_warning_state(
     )
 
 
+def _bind_request_user(payload: TransferEvaluateRequest, user_id: str) -> TransferEvaluateRequest:
+    return payload.model_copy(update={"user_id": user_id})
+
+
+def _settle_wallet_or_4xx(
+    wallet_ledger: WalletLedger,
+    sender_user_id: str,
+    recipient_user_id: str,
+    amount: float,
+) -> WalletSettlementResult:
+    try:
+        return wallet_ledger.settle_transfer(
+            sender_user_id=sender_user_id,
+            recipient_user_id=recipient_user_id,
+            amount=amount,
+        )
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InsufficientBalanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WalletSettlementError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"wallet_settlement_failed: {exc}") from exc
+
+
 @router.post("/transfer/llm-decision", response_model=TransferEvaluateResponse)
 def transfer_llm_decision(
     request: Request,
     payload: LlmTransferDecisionRequest,
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
+    wallet_ledger: WalletLedger = Depends(get_wallet_ledger),
+    current_user_id: str = Depends(get_current_user_id),
 ) -> TransferEvaluateResponse:
+    payload = _bind_request_user(payload, current_user_id)
     risk = RiskCheckResult(
         decision=payload.decision,
         risk_score=payload.risk_score,
@@ -78,12 +117,36 @@ def transfer_llm_decision(
         latency_ms=0,
     )
     transaction_payload = TransferEvaluateRequest.model_validate(payload.model_dump())
+    requires_hitl = not payload.hitl_already_confirmed
+    settlement: WalletSettlementResult | None = None
+
+    if not requires_hitl:
+        settlement = _settle_wallet_or_4xx(
+            wallet_ledger=wallet_ledger,
+            sender_user_id=transaction_payload.user_id,
+            recipient_user_id=transaction_payload.recipient_id,
+            amount=transaction_payload.amount,
+        )
+
     transaction_id = _persist_transfer_or_503(
         risk_engine=risk_engine,
         payload=transaction_payload,
         risk=risk,
-        requires_hitl=True,
+        requires_hitl=requires_hitl,
     )
+
+    if not requires_hitl:
+        return TransferEvaluateResponse(
+            decision=risk.decision,
+            risk_score=risk.risk_score,
+            reason_codes=risk.reason_codes,
+            evidence_refs=risk.evidence_refs,
+            latency_ms=risk.latency_ms,
+            warning_id=None,
+            warning_delay_seconds=0,
+            sender_balance=settlement.sender_balance if settlement else None,
+            recipient_balance=settlement.recipient_balance if settlement else None,
+        )
 
     default_warning_delay_seconds = int(request.app.state.warning_delay_seconds)
     if risk.decision == "WARNING":
@@ -110,6 +173,8 @@ def transfer_llm_decision(
         latency_ms=risk.latency_ms,
         warning_id=warning_state.warning_id,
         warning_delay_seconds=warning_delay_seconds,
+        sender_balance=None,
+        recipient_balance=None,
     )
 
 
@@ -120,17 +185,30 @@ def transfer_evaluate(
     graph: Any = Depends(get_flow_graph),
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
+    wallet_ledger: WalletLedger = Depends(get_wallet_ledger),
+    current_user_id: str = Depends(get_current_user_id),
 ) -> TransferEvaluateResponse:
+    payload = _bind_request_user(payload, current_user_id)
     output = graph.invoke({"request": payload})
     risk = output["risk"]
     if not isinstance(risk, RiskCheckResult):
         raise HTTPException(status_code=502, detail="invalid_risk_graph_result")
 
+    requires_hitl = risk.decision != "APPROVED"
+    settlement: WalletSettlementResult | None = None
+    if not requires_hitl:
+        settlement = _settle_wallet_or_4xx(
+            wallet_ledger=wallet_ledger,
+            sender_user_id=payload.user_id,
+            recipient_user_id=payload.recipient_id,
+            amount=payload.amount,
+        )
+
     transaction_id = _persist_transfer_or_503(
         risk_engine=risk_engine,
         payload=payload,
         risk=risk,
-        requires_hitl=risk.decision != "APPROVED",
+        requires_hitl=requires_hitl,
     )
 
     warning_state: WarningState | None = None
@@ -154,6 +232,8 @@ def transfer_evaluate(
         latency_ms=risk.latency_ms,
         warning_id=warning_state.warning_id if warning_state else None,
         warning_delay_seconds=warning_delay_seconds,
+        sender_balance=settlement.sender_balance if settlement else None,
+        recipient_balance=settlement.recipient_balance if settlement else None,
     )
 
 
@@ -162,22 +242,43 @@ def warning_confirm(
     payload: WarningConfirmRequest,
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
+    wallet_ledger: WalletLedger = Depends(get_wallet_ledger),
+    current_user_id: str = Depends(get_current_user_id),
 ) -> WarningConfirmResponse:
     warning = warning_store.get(payload.warning_id)
     if warning is None:
         raise HTTPException(status_code=404, detail="warning_id not found")
+    if warning.user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="warning_id does not belong to current user")
 
-    if not payload.confirmed:
-        _update_transfer_or_503(
-            risk_engine=risk_engine,
-            transaction_id=warning.transaction_id,
-            status="reversed",
-        )
+    if warning.state == "approved":
+        return WarningConfirmResponse(status="APPROVED_AFTER_WARNING")
+    if warning.state == "cancelled":
         return WarningConfirmResponse(status="CANCELLED")
 
-    approved, wait_left = warning_store.approve_if_delay_passed(payload.warning_id, time.time())
+    if not payload.confirmed:
+        cancelled_now = warning_store.cancel(payload.warning_id)
+        if cancelled_now:
+            _update_transfer_or_503(
+                risk_engine=risk_engine,
+                transaction_id=warning.transaction_id,
+                status="reversed",
+            )
+        return WarningConfirmResponse(status="CANCELLED")
+
+    approved, wait_left, already_approved = warning_store.approve_if_delay_passed(payload.warning_id, time.time())
+    if already_approved:
+        return WarningConfirmResponse(status="APPROVED_AFTER_WARNING")
     if not approved:
         return WarningConfirmResponse(status="PENDING_DELAY", wait_seconds_remaining=wait_left)
+
+    _settle_wallet_or_4xx(
+        wallet_ledger=wallet_ledger,
+        sender_user_id=warning.user_id,
+        recipient_user_id=warning.recipient_id,
+        amount=warning.amount,
+    )
+
     updated = _update_transfer_or_503(
         risk_engine=risk_engine,
         transaction_id=warning.transaction_id,

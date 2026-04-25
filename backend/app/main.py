@@ -1,4 +1,5 @@
 import logging
+from threading import Lock
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from transaction_agent import build_main_deep_agent
 from app.api.v1.router import api_router
 from app.core.config import Settings
 from app.services.risk_engine import NeptuneRiskClient, RiskEngine, build_graph
+from app.services.wallet_ledger import WalletLedger
 from app.services.warnings import InMemoryWarningStore
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,10 @@ def create_app() -> FastAPI:
     app.state.risk_engine = risk_engine
     app.state.flow_graph = build_graph(risk_engine)
     app.state.warning_store = InMemoryWarningStore()
+    app.state.wallet_ledger = WalletLedger(settings=settings)
     app.state.warning_delay_seconds = settings.warning_delay_seconds
+    app.state.voice_thread_owners = {}
+    app.state.voice_thread_owners_lock = Lock()
     try:
         provider = (settings.main_agent_model_provider or "").strip().lower()
         api_key = None

@@ -27,6 +27,7 @@ export function TopNav({ view, onViewChange, isAdmin, onToggleRole, userName }: 
 
   function signOut() {
     localStorage.removeItem("auth_token")
+    localStorage.removeItem("user_id")
     localStorage.removeItem("user_name")
     localStorage.removeItem("user_email")
     localStorage.removeItem("user_phone")

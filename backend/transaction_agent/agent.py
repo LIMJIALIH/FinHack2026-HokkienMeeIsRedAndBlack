@@ -9,10 +9,9 @@ import json
 import os
 import uuid
 from collections.abc import Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.messages import AIMessage
@@ -26,7 +25,11 @@ from transaction_agent.graph_tools import (
     get_user_node_info_tool,
     search_contact_nodes_tool,
 )
-from transaction_agent.tools import submit_llm_transfer_decision_tool
+from transaction_agent.tools import (
+    reset_request_auth_header,
+    set_request_auth_header,
+    submit_llm_transfer_decision_tool,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,14 @@ def execute_transfer(
     Returns:
         JSON string with the persisted transfer result.
     """
+    normalized_reasons = reason_codes or []
+    if risk_score >= 70:
+        decision = "INTERVENTION_REQUIRED"
+    elif risk_score >= 40 or normalized_reasons:
+        decision = "WARNING"
+    else:
+        decision = "APPROVED"
+
     result = submit_llm_transfer_decision_tool(
         user_id=sender_user_id,
         recipient_id=recipient_id,
@@ -74,10 +85,11 @@ def execute_transfer(
         currency=currency,
         tx_note=tx_note,
         recipient_is_new=False,
-        decision="APPROVED",
+        decision=decision,
         risk_score=risk_score,
-        reason_codes=reason_codes or [],
+        reason_codes=normalized_reasons,
         evidence_refs=evidence_refs or [],
+        hitl_already_confirmed=True,
     )
     return json.dumps(result)
 
@@ -241,14 +253,12 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
     recipient_name = raw_recipient
     if recipient_name.startswith("user:"):
         recipient_name = recipient_name[5:]
-    recipient_name = " ".join(
-        part.capitalize() for part in recipient_name.replace("-", " ").replace("_", " ").split()
-    ) or "Unknown"
+    recipient_name = recipient_name.strip() or "unknown"
 
     # Derive decision preview from risk score for frontend display.
     if risk_score >= 70:
         decision_preview = "INTERVENTION_REQUIRED"
-    elif risk_score >= 30 or reason_codes:
+    elif risk_score >= 40 or reason_codes:
         decision_preview = "WARNING"
     else:
         decision_preview = "APPROVED"
@@ -271,6 +281,42 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
             {"action": "approve", "warning_id": None, "label": "Approve"},
             {"action": "reject", "warning_id": None, "label": "Reject"},
         ],
+    }
+
+
+def _extract_last_execute_transfer_args(messages: list[Any]) -> dict[str, Any] | None:
+    """Extract the latest execute_transfer call args from AI tool_calls."""
+    for msg in reversed(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in msg.tool_calls or []:
+            if tc.get("name") == "execute_transfer":
+                args = tc.get("args", {})
+                if isinstance(args, dict):
+                    return args
+        if msg.tool_calls:
+            break
+    return None
+
+
+def _build_transfer_summary(tool_args: dict[str, Any]) -> dict[str, Any]:
+    recipient_name = str(tool_args.get("recipient_id", "unknown")).strip()
+    if recipient_name.startswith("user:"):
+        recipient_name = recipient_name[5:]
+    return {
+        "amount": float(tool_args.get("amount", 0) or 0),
+        "currency": str(tool_args.get("currency", "MYR") or "MYR"),
+        "recipient_name": recipient_name or "unknown",
+        "purpose": str(tool_args.get("message", "") or ""),
+        "risk_score": int(tool_args.get("risk_score", 0) or 0),
+        "reason_codes": list(tool_args.get("reason_codes") or []),
+        "decision_preview": (
+            "INTERVENTION_REQUIRED"
+            if int(tool_args.get("risk_score", 0) or 0) >= 70
+            else "WARNING"
+            if int(tool_args.get("risk_score", 0) or 0) >= 40 or list(tool_args.get("reason_codes") or [])
+            else "APPROVED"
+        ),
     }
 
 
@@ -398,6 +444,7 @@ def run_main_turn(
     text: str,
     thread_id: str | None = None,
     user_id: str | None = None,
+    auth_header: str | None = None,
     finbert_score: float | None = None,
     finbert_assessment: str | None = None,
 ) -> dict[str, Any]:
@@ -414,39 +461,41 @@ def run_main_turn(
     resolved_user_id = _resolve_user_id(user_id)
     config = _runtime_config(resolved_thread_id)
 
-    # If this thread has unresolved interrupts from a previous turn
-    # (orphaned tool_calls), start a fresh thread to avoid OpenAI
-    # rejecting the malformed message history.
+    # If this thread already has a pending HITL interrupt, return the
+    # current pending state instead of switching to a new thread.
     if thread_id:
         try:
             state = agent.agent.get_state(config)
             if state.tasks:
-                resolved_thread_id = str(uuid.uuid4())
-                config = _runtime_config(resolved_thread_id)
+                return _build_response_from_state(agent, resolved_thread_id, config)
         except Exception:  # noqa: BLE001
             pass
 
+    auth_token = set_request_auth_header(auth_header)
     try:
-        agent.agent.invoke(
-            _build_turn_payload(
-                text=text,
-                user_id=resolved_user_id,
-                finbert_score=finbert_score,
-                finbert_assessment=finbert_assessment,
-            ),
-            config=config,
-        )
-    except GraphRecursionError:
-        return _error_payload(
-            resolved_thread_id,
-            "Request took too many reasoning steps. "
-            "Please rephrase with transfer details (recipient and amount).",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return _error_payload(
-            resolved_thread_id,
-            f"Unable to process transfer request: {exc}",
-        )
+        try:
+            agent.agent.invoke(
+                _build_turn_payload(
+                    text=text,
+                    user_id=resolved_user_id,
+                    finbert_score=finbert_score,
+                    finbert_assessment=finbert_assessment,
+                ),
+                config=config,
+            )
+        except GraphRecursionError:
+            return _error_payload(
+                resolved_thread_id,
+                "Request took too many reasoning steps. "
+                "Please rephrase with transfer details (recipient and amount).",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _error_payload(
+                resolved_thread_id,
+                f"Unable to process transfer request: {exc}",
+            )
+    finally:
+        reset_request_auth_header(auth_token)
 
     # Check whether the graph paused at execute_transfer.
     return _build_response_from_state(agent, resolved_thread_id, config)
@@ -484,6 +533,7 @@ def _build_response_from_state(
                             "mode": "hitl_required",
                             "assistant_text": assistant_text,
                             "card": _build_review_card(tool_args),
+                            "transfer": _build_transfer_summary(tool_args),
                             "backend_status": "HITL_REQUIRED",
                             "steps": steps,
                         },
@@ -503,6 +553,10 @@ def _build_response_from_state(
         if not isinstance(m, AIMessage)
     )
     backend_status = "APPROVED" if has_transfer_result else "NEED_MORE_INFO"
+    transfer_summary = None
+    transfer_args = _extract_last_execute_transfer_args(messages)
+    if transfer_args is not None:
+        transfer_summary = _build_transfer_summary(transfer_args)
 
     return {
         "thread_id": thread_id,
@@ -510,6 +564,7 @@ def _build_response_from_state(
             "mode": "final",
             "assistant_text": assistant_text,
             "card": None,
+            "transfer": transfer_summary,
             "backend_status": backend_status,
             "steps": steps,
         },
@@ -556,6 +611,7 @@ def resume_main_hitl(
     decision: str,
     warning_id: str | None = None,
     purpose: str | None = None,
+    auth_header: str | None = None,
 ) -> dict[str, Any]:
     """Resume the paused graph after a human approve/reject decision.
 
@@ -579,14 +635,23 @@ def resume_main_hitl(
             "decisions": [{"type": "reject", "message": reject_msg}],
         }
 
+    auth_token = set_request_auth_header(auth_header)
     try:
-        agent.agent.invoke(Command(resume=resume_value), config=config)
-    except GraphRecursionError:
-        return _error_payload(thread_id, "Transfer processing exceeded step limit.")
-    except Exception as exc:  # noqa: BLE001
-        return _error_payload(thread_id, f"Unable to process decision: {exc}")
+        try:
+            agent.agent.invoke(Command(resume=resume_value), config=config)
+        except GraphRecursionError:
+            return _error_payload(thread_id, "Transfer processing exceeded step limit.")
+        except Exception as exc:  # noqa: BLE001
+            return _error_payload(thread_id, f"Unable to process decision: {exc}")
+    finally:
+        reset_request_auth_header(auth_token)
 
-    return _build_response_from_state(agent, thread_id, config)
+    response = _build_response_from_state(agent, thread_id, config)
+    if decision != "approve":
+        result = response.get("result")
+        if isinstance(result, dict):
+            result["backend_status"] = "REJECTED_BY_USER"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +663,7 @@ def run_main_turn_stream_events(
     text: str,
     thread_id: str | None = None,
     user_id: str | None = None,
+    auth_header: str | None = None,
     finbert_score: float | None = None,
     finbert_assessment: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
@@ -609,6 +675,7 @@ def run_main_turn_stream_events(
         text=text,
         thread_id=resolved_thread_id,
         user_id=user_id,
+        auth_header=auth_header,
         finbert_score=finbert_score,
         finbert_assessment=finbert_assessment,
     )

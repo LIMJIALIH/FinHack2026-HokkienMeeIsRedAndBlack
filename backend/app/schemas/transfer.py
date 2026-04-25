@@ -38,6 +38,8 @@ class TransferEvaluateResponse(BaseModel):
     latency_ms: int
     warning_id: str | None = None
     warning_delay_seconds: int | None = None
+    sender_balance: float | None = None
+    recipient_balance: float | None = None
 
 
 class LlmTransferDecisionRequest(TransferEvaluateRequest):
@@ -45,6 +47,7 @@ class LlmTransferDecisionRequest(TransferEvaluateRequest):
     risk_score: int = Field(ge=0, le=100)
     reason_codes: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    hitl_already_confirmed: bool = False
 
 
 class WarningConfirmRequest(BaseModel):

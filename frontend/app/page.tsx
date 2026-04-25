@@ -4,7 +4,6 @@ import { useEffect, useState } from "react"
 import { TopNav } from "@/components/guardian/top-nav"
 import { WalletView } from "@/components/guardian/wallet-view"
 import { DashboardView } from "@/components/guardian/dashboard-view"
-import { SpeechToTextCard } from "@/components/guardian/speech-to-text-card"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
 
@@ -33,9 +32,14 @@ export type Transaction = {
   decision: string
 }
 
-type FinbertSignal = {
-  score?: number | null
-  assessment?: string | null
+type AgentTransferSummary = {
+  amount: number
+  currency: string
+  recipient_name: string
+  purpose?: string
+  risk_score?: number
+  reason_codes?: string[]
+  decision_preview?: "APPROVED" | "WARNING" | "INTERVENTION_REQUIRED"
 }
 
 const INITIAL_BALANCE = 250
@@ -53,9 +57,6 @@ export default function Page() {
   const [protectedAmount, setProtectedAmount] = useState<number>(45200)
   const [threatsBlocked, setThreatsBlocked] = useState<number>(12)
   const [lastBlocked, setLastBlocked] = useState<{ amount: number; recipient: string } | null>(null)
-
-  const [externalPrompt, setExternalPrompt] = useState<string | null>(null)
-  const [externalFinbertData, setExternalFinbertData] = useState<FinbertSignal | null>(null)
 
   useEffect(() => {
     const token = localStorage.getItem("auth_token")
@@ -79,10 +80,27 @@ export default function Page() {
             setBalance(bal)
             setUserBaseBalance(bal)
           }
+          if (json?.id) {
+            localStorage.setItem("user_id", String(json.id))
+          }
         })
         .catch(() => {})
     }
   }, [])
+
+  const refreshWalletFromBackend = async (): Promise<void> => {
+    const token = localStorage.getItem("auth_token")
+    if (!token) return
+    const response = await fetch(`${API_URL}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!response.ok) return
+    const data = (await response.json()) as { balance?: number }
+    if (data.balance === undefined) return
+    const bal = Number(data.balance)
+    setBalance(bal)
+    setUserBaseBalance(bal)
+  }
 
   function handleToggleRole() {
     setIsAdmin((prev) => {
@@ -102,63 +120,63 @@ export default function Page() {
     })
   }
 
-  const handleSafeTransfer = () => {
+  const handleSafeTransfer = (transfer: AgentTransferSummary) => {
     const newTx: Transaction = {
       id: `tx-${Date.now()}`,
-      recipient: "Ali",
-      amount: 15,
-      currency: "MYR",
-      purpose: "Lunch",
+      recipient: transfer.recipient_name,
+      amount: transfer.amount,
+      currency: transfer.currency || "MYR",
+      purpose: transfer.purpose || "Transfer",
       date: "Just now",
       type: "sent",
       status: "approved",
       channel: "voice_agent",
-      risk_score: 8,
-      reason_codes: [],
+      risk_score: transfer.risk_score ?? 0,
+      reason_codes: transfer.reason_codes ?? [],
       decision: "APPROVED",
     }
     setTransactions((prev) => [newTx, ...prev])
-    setBalance((prev) => prev - 15)
+    void refreshWalletFromBackend()
   }
 
-  const handleScamCanceled = () => {
-    setProtectedAmount((prev) => prev + 1000)
+  const handleScamCanceled = (transfer: AgentTransferSummary) => {
+    setProtectedAmount((prev) => prev + transfer.amount)
     setThreatsBlocked((prev) => prev + 1)
-    setLastBlocked({ amount: 1000, recipient: "Investment Agent" })
+    setLastBlocked({ amount: transfer.amount, recipient: transfer.recipient_name })
     const blockedTx: Transaction = {
       id: `tx-${Date.now()}`,
-      recipient: "Investment Agent",
-      amount: 1000,
-      currency: "MYR",
-      purpose: "Investment Deposit",
+      recipient: transfer.recipient_name,
+      amount: transfer.amount,
+      currency: transfer.currency || "MYR",
+      purpose: transfer.purpose || "Transfer",
       date: "Just now",
       type: "sent",
       status: "reversed",
       channel: "voice_agent",
-      risk_score: 82,
-      reason_codes: ["FINBERT_NEGATIVE_HIGH", "GRAPH_HIGH_RISK_HISTORY"],
+      risk_score: transfer.risk_score ?? 0,
+      reason_codes: transfer.reason_codes ?? [],
       decision: "INTERVENTION_REQUIRED",
     }
     setTransactions((prev) => [blockedTx, ...prev])
   }
 
-  const handleScamProceed = () => {
+  const handleScamProceed = (transfer: AgentTransferSummary) => {
     const newTx: Transaction = {
       id: `tx-${Date.now()}`,
-      recipient: "Investment Agent",
-      amount: 1000,
-      currency: "MYR",
-      purpose: "Investment Deposit",
+      recipient: transfer.recipient_name,
+      amount: transfer.amount,
+      currency: transfer.currency || "MYR",
+      purpose: transfer.purpose || "Transfer",
       date: "Just now",
       type: "sent",
       status: "warned",
       channel: "voice_agent",
-      risk_score: 82,
-      reason_codes: ["FINBERT_NEGATIVE_HIGH", "GRAPH_HIGH_RISK_HISTORY"],
-      decision: "WARNING",
+      risk_score: transfer.risk_score ?? 0,
+      reason_codes: transfer.reason_codes ?? [],
+      decision: transfer.decision_preview ?? "WARNING",
     }
     setTransactions((prev) => [newTx, ...prev])
-    setBalance((prev) => prev - 1000)
+    void refreshWalletFromBackend()
   }
 
   const handleReset = () => {
@@ -212,26 +230,10 @@ export default function Page() {
             onReset={handleReset}
             onReload={isLoggedIn ? handleReload : undefined}
             userName={userName}
-            externalPrompt={externalPrompt}
-            externalFinbertData={externalFinbertData}
           />
         ) : (
           <DashboardView protectedAmount={protectedAmount} threatsBlocked={threatsBlocked} />
         )}
-
-        <div className="mt-6">
-          <SpeechToTextCard
-            onTranscriptionReady={({ text, finbertScore, finbertAssessment }) => {
-              setView("wallet")
-              setIsAdmin(false)
-              setExternalPrompt(text)
-              setExternalFinbertData({
-                score: finbertScore ?? null,
-                assessment: finbertAssessment ?? null,
-              })
-            }}
-          />
-        </div>
       </div>
     </main>
   )

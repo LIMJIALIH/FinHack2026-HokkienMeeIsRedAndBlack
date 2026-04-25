@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,7 +13,7 @@ class Settings(BaseSettings):
     aws_region: str = "ap-southeast-1"
     aws_profile: str = ""
     neptune_endpoint: str = ""
-    dev_user_id: str = "Eric Wong"
+    dev_user_id: str = ""
 
     # Risk / HITL
     warning_delay_seconds: int = 30
@@ -43,6 +44,19 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("neptune_endpoint", mode="before")
+    @classmethod
+    def normalize_neptune_endpoint(cls, value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if "://" in raw:
+            raw = raw.split("://", 1)[1]
+        raw = raw.split("/", 1)[0]
+        if ":" in raw:
+            raw = raw.split(":", 1)[0]
+        return raw.strip()
 
 
 settings = Settings()

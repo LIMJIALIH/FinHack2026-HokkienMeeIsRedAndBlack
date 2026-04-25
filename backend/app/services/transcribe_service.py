@@ -47,7 +47,7 @@ class TranscribeService:
                         "type": "text",
                         "text": (
                             "Transcribe this speech audio. "
-                            f"Language hint: {language_code}. "
+                            f"Language hint: Target user normally Malaysian. "
                             "Return only the transcript text. "
                             "Do not add commentary, labels, or markdown."
                         ),

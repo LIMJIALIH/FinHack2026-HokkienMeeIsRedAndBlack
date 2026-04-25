@@ -7,9 +7,12 @@ These are thin HTTP wrappers that call the FastAPI backend.  They are
 
 import json
 import os
+from contextvars import ContextVar
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+_REQUEST_AUTH_HEADER: ContextVar[str | None] = ContextVar("request_auth_header", default=None)
 
 
 def _backend_base_url() -> str:
@@ -17,11 +20,37 @@ def _backend_base_url() -> str:
     return base.rstrip("/")
 
 
-def _post_json(path: str, payload: dict[str, Any], timeout_seconds: float = 5.0) -> dict[str, Any]:
+def set_request_auth_header(authorization: str | None):
+    return _REQUEST_AUTH_HEADER.set(authorization)
+
+
+def reset_request_auth_header(token) -> None:
+    _REQUEST_AUTH_HEADER.reset(token)
+
+
+def _effective_auth_header(authorization: str | None = None) -> str | None:
+    if authorization:
+        return authorization
+    context_header = _REQUEST_AUTH_HEADER.get()
+    if context_header:
+        return context_header
+    env_header = os.getenv("VOICE_AGENT_AUTH_HEADER", "").strip()
+    return env_header or None
+
+
+def _post_json(
+    path: str,
+    payload: dict[str, Any],
+    timeout_seconds: float = 5.0,
+    authorization: str | None = None,
+) -> dict[str, Any]:
     url = f"{_backend_base_url()}{path}"
     body = json.dumps(payload).encode("utf-8")
     req = Request(url=url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
+    auth_header = _effective_auth_header(authorization)
+    if auth_header:
+        req.add_header("Authorization", auth_header)
     try:
         with urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read().decode("utf-8")
@@ -31,6 +60,33 @@ def _post_json(path: str, payload: dict[str, Any], timeout_seconds: float = 5.0)
         raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {err_body}") from exc
     except URLError as exc:
         raise RuntimeError(f"Connection error to {url}: {exc}") from exc
+
+
+def _post_json_with_api_v1_fallback(
+    path: str,
+    payload: dict[str, Any],
+    timeout_seconds: float = 5.0,
+    authorization: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return _post_json(
+            path=path,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            authorization=authorization,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "HTTP 404" not in message:
+            raise
+
+    prefixed_path = f"/api/v1{path}" if not path.startswith("/api/v1/") else path
+    return _post_json(
+        path=prefixed_path,
+        payload=payload,
+        timeout_seconds=timeout_seconds,
+        authorization=authorization,
+    )
 
 
 def submit_llm_transfer_decision_tool(
@@ -48,6 +104,7 @@ def submit_llm_transfer_decision_tool(
     recipient_is_new: bool = False,
     tx_time: str | None = None,
     transaction_id: str | None = None,
+    hitl_already_confirmed: bool = False,
 ) -> dict[str, Any]:
     """Persist an LLM fraud decision and create the HITL warning state."""
     payload = {
@@ -65,11 +122,20 @@ def submit_llm_transfer_decision_tool(
         "risk_score": risk_score,
         "reason_codes": reason_codes,
         "evidence_refs": evidence_refs,
+        "hitl_already_confirmed": hitl_already_confirmed,
     }
-    return _post_json("/transfer/llm-decision", payload=payload, timeout_seconds=8.0)
+    return _post_json_with_api_v1_fallback(
+        "/transfer/llm-decision",
+        payload=payload,
+        timeout_seconds=8.0,
+    )
 
 
 def confirm_warning_tool(warning_id: str, confirmed: bool) -> dict[str, Any]:
     """Approve or reject a WARNING/INTERVENTION transfer after user HITL decision."""
     payload = {"warning_id": warning_id, "confirmed": confirmed}
-    return _post_json("/transfer/warning/confirm", payload=payload, timeout_seconds=8.0)
+    return _post_json_with_api_v1_fallback(
+        "/transfer/warning/confirm",
+        payload=payload,
+        timeout_seconds=8.0,
+    )

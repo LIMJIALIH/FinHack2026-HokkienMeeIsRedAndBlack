@@ -131,6 +131,9 @@ class FraudScoreService:
             gemini_assessment=gemini_assessment,
             fraud_spam_final=fraud_spam_final,
             confidence=confidence,
+            risk_score=fraud_score.risk_score,
+            risk_level=fraud_score.risk_level,
+            overall_pattern_risk=pattern_check.overall_pattern_risk,
         )
 
     def _analyze_with_gemini(

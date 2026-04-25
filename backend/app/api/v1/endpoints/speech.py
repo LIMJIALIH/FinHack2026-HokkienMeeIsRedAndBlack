@@ -1,7 +1,8 @@
 import os
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from app.core.auth import get_current_user_id
 from app.schemas.speech import (
     FinBertCheckRequest,
     FinBertCheckResponse,
@@ -20,9 +21,9 @@ router = APIRouter()
 async def transcribe_speech(
     file: UploadFile = File(...),
     language_code: str = Form("en-US"),
-    sender_id: str = Form("speech_user"),
     receiver_id: str = Form("unknown_receiver"),
     currency: str = Form("MYR"),
+    current_user_id: str = Depends(get_current_user_id),
 ) -> SpeechToTextResponse:
     media_format = _infer_media_format(file)
     if not media_format:
@@ -54,7 +55,7 @@ async def transcribe_speech(
     if validation_result.is_valid_complete_transfer:
         fraud_score = FraudScoreService().score_text(
             text=text,
-            sender_id=sender_id,
+            sender_id=current_user_id,
             receiver_id=receiver_id,
             currency=currency,
         )
@@ -76,14 +77,17 @@ async def transcribe_speech(
 
 
 @router.post("/speech/check-finbert", response_model=FinBertCheckResponse)
-async def check_with_finbert(payload: FinBertCheckRequest) -> FinBertCheckResponse:
+async def check_with_finbert(
+    payload: FinBertCheckRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> FinBertCheckResponse:
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text is required for FinBert scoring.")
 
     return FraudScoreService().run_combined_check(
         text=text,
-        sender_id=payload.sender_id,
+        sender_id=current_user_id,
         receiver_id=payload.receiver_id,
         currency=payload.currency,
     )

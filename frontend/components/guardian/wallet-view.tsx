@@ -11,6 +11,7 @@ import {
   EyeOff,
   Loader2,
   Mic,
+  Square,
   PlusCircle,
   Radio,
   RotateCcw,
@@ -35,19 +36,50 @@ type ExternalFinbertData = {
   assessment?: string | null
 }
 
+type AgentTransferSummary = {
+  amount: number
+  currency: string
+  recipient_name: string
+  purpose?: string
+  risk_score?: number
+  reason_codes?: string[]
+  decision_preview?: "APPROVED" | "WARNING" | "INTERVENTION_REQUIRED"
+}
+
+type SpeechToTextResponse = {
+  text: string
+  job_name: string
+  language_code: string
+  fraud_score?: {
+    risk_score?: number | null
+  } | null
+  transfer_validation?: {
+    is_valid_complete_transfer: boolean
+    missing_fields: string[]
+    reason: string
+  } | null
+}
+
+type FinBertCheckResponse = {
+  gemini_assessment: string
+  fraud_spam_final?: boolean | null
+  confidence?: string | null
+  risk_score?: number | null
+  risk_level?: string | null
+  overall_pattern_risk?: number | null
+}
+
 type WalletViewProps = {
   balance: number
   transactions: Transaction[]
   lastBlocked: { amount: number; recipient: string } | null
   onClearBlocked: () => void
-  onSafeTransfer: () => void
-  onScamCanceled: () => void
-  onScamProceed: () => void
+  onSafeTransfer: (transfer: AgentTransferSummary) => void
+  onScamCanceled: (transfer: AgentTransferSummary) => void
+  onScamProceed: (transfer: AgentTransferSummary) => void
   onReset: () => void
   onReload?: (amount: number) => Promise<void>
   userName?: string
-  externalPrompt?: string | null
-  externalFinbertData?: ExternalFinbertData | null
 }
 
 type FlowState = "idle" | "processing-safe" | "scam-detected" | "processing-scam" | "success-safe"
@@ -56,6 +88,9 @@ type TransferReviewCard = {
   card_type: "transfer_review"
   title: string
   subtitle: string
+  amount?: number
+  currency?: string
+  recipient_name?: string
   decision_preview: "APPROVED" | "WARNING" | "INTERVENTION_REQUIRED"
   risk_score: number
   reason_codes: string[]
@@ -70,12 +105,21 @@ type VoiceTurnResponse = {
   mode: "hitl_required" | "final"
   assistant_text: string
   card: TransferReviewCard | null
+  transfer?: AgentTransferSummary | null
   backend_status: string | null
   steps: string[]
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
-const VOICE_USER_ID = process.env.NEXT_PUBLIC_VOICE_USER_ID ?? "Eric Wong"
+const MIME_CANDIDATES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+const TARGET_SAMPLE_RATE = 16000
+
+function getAuthContext(): { token: string; userId?: string } | null {
+  const token = localStorage.getItem("auth_token")?.trim() ?? ""
+  if (!token) return null
+  const userId = localStorage.getItem("user_id")?.trim() ?? ""
+  return userId ? { token, userId } : { token }
+}
 
 async function readVoiceStream(
   body: ReadableStream<Uint8Array>,
@@ -131,8 +175,6 @@ export function WalletView({
   onReset,
   onReload,
   userName,
-  externalPrompt,
-  externalFinbertData,
 }: WalletViewProps) {
   const [flow, setFlow] = useState<FlowState>("idle")
   const [showBalance, setShowBalance] = useState(true)
@@ -145,10 +187,16 @@ export function WalletView({
   const [agentStep, setAgentStep] = useState<string | null>(null)
   const [transferPurpose, setTransferPurpose] = useState("")
   const [pendingFinbert, setPendingFinbert] = useState<ExternalFinbertData | null>(null)
-  const lastAutoPrompt = useRef("")
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [isCheckingFinbert, setIsCheckingFinbert] = useState(false)
 
-  const triggerSafe = useCallback(() => {
-    onSafeTransfer()
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+
+  const triggerSafe = useCallback((transfer: AgentTransferSummary) => {
+    onSafeTransfer(transfer)
     setFlow("success-safe")
     setTimeout(() => setFlow("idle"), 1600)
   }, [onSafeTransfer])
@@ -156,62 +204,264 @@ export function WalletView({
   const handleCancel = useCallback(async () => {
     setErrorMessage(null)
     setFlow("processing-scam")
-    if (activeThreadId) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/voice/decision`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            thread_id: activeThreadId,
-            warning_id: reviewCard?.warning_id,
-            decision: "reject",
-            purpose: transferPurpose,
-          }),
-        })
-        if (!response.ok) {
-          throw new Error("Unable to reject transfer decision.")
-        }
-      } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
-      }
+    if (!activeThreadId) {
+      setErrorMessage("Missing transfer thread.")
+      setFlow("scam-detected")
+      return
     }
-    onScamCanceled()
+    try {
+      const auth = getAuthContext()
+      if (!auth) throw new Error("Please sign in again.")
+      const response = await fetch(`${API_BASE_URL}/voice/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({
+          thread_id: activeThreadId,
+          warning_id: reviewCard?.warning_id,
+          decision: "reject",
+          purpose: transferPurpose,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error("Unable to reject transfer decision.")
+      }
+      const payload: VoiceTurnResponse = await response.json()
+      setLatestAgentText(payload.assistant_text)
+      if (payload.mode === "hitl_required" && payload.card) {
+        setReviewCard(payload.card)
+        setFlow("scam-detected")
+        return
+      }
+      if (payload.backend_status !== "REJECTED_BY_USER") {
+        throw new Error("Transfer rejection was not confirmed by backend.")
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+      setFlow("scam-detected")
+      return
+    }
+    onScamCanceled({
+      amount: reviewCard?.amount ?? 0,
+      currency: reviewCard?.currency ?? "MYR",
+      recipient_name: reviewCard?.recipient_name ?? reviewCard?.subtitle ?? "Unknown recipient",
+      purpose: transferPurpose,
+      risk_score: reviewCard?.risk_score,
+      reason_codes: reviewCard?.reason_codes ?? [],
+      decision_preview: reviewCard?.decision_preview,
+    })
     setReviewCard(null)
-    setLatestAgentText("")
     setTransferPurpose("")
     setActiveThreadId(null)
+    setPendingFinbert(null)
     setFlow("idle")
-  }, [activeThreadId, onScamCanceled, reviewCard?.warning_id, transferPurpose])
+  }, [activeThreadId, onScamCanceled, reviewCard, transferPurpose])
 
   const handleProceed = useCallback(async () => {
     setErrorMessage(null)
     setFlow("processing-scam")
-    if (activeThreadId) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/voice/decision`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            thread_id: activeThreadId,
-            warning_id: reviewCard?.warning_id,
-            decision: "approve",
-            purpose: transferPurpose,
-          }),
-        })
-        if (!response.ok) {
-          throw new Error("Unable to approve transfer decision.")
-        }
-      } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
-      }
+    if (!activeThreadId) {
+      setErrorMessage("Missing transfer thread.")
+      setFlow("scam-detected")
+      return
     }
-    onScamProceed()
+    try {
+      const auth = getAuthContext()
+      if (!auth) throw new Error("Please sign in again.")
+      const response = await fetch(`${API_BASE_URL}/voice/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({
+          thread_id: activeThreadId,
+          warning_id: reviewCard?.warning_id,
+          decision: "approve",
+          purpose: transferPurpose,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error("Unable to approve transfer decision.")
+      }
+      const payload: VoiceTurnResponse = await response.json()
+      setLatestAgentText(payload.assistant_text)
+      if (payload.mode === "hitl_required" && payload.card) {
+        setReviewCard(payload.card)
+        setFlow("scam-detected")
+        return
+      }
+      if (payload.backend_status !== "APPROVED" || !payload.transfer) {
+        throw new Error("Transfer was not approved by backend.")
+      }
+      onScamProceed({
+        amount: payload.transfer.amount,
+        currency: payload.transfer.currency ?? reviewCard?.currency ?? "MYR",
+        recipient_name: payload.transfer.recipient_name ?? reviewCard?.recipient_name ?? reviewCard?.subtitle ?? "Unknown recipient",
+        purpose: payload.transfer.purpose ?? transferPurpose,
+        risk_score: payload.transfer.risk_score ?? reviewCard?.risk_score,
+        reason_codes: payload.transfer.reason_codes ?? reviewCard?.reason_codes ?? [],
+        decision_preview: payload.transfer.decision_preview ?? reviewCard?.decision_preview,
+      })
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+      setFlow("scam-detected")
+      return
+    }
     setReviewCard(null)
-    setLatestAgentText("")
     setTransferPurpose("")
     setActiveThreadId(null)
+    setPendingFinbert(null)
     setFlow("idle")
-  }, [activeThreadId, onScamProceed, reviewCard?.warning_id, transferPurpose])
+  }, [activeThreadId, onScamProceed, reviewCard, transferPurpose])
+
+  const cleanupMedia = useCallback(() => {
+    mediaRecorderRef.current = null
+    chunksRef.current = []
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop())
+      mediaStreamRef.current = null
+    }
+  }, [])
+
+  const checkWithFinBert = useCallback(async (text: string, score: number | null) => {
+    setIsCheckingFinbert(true)
+    try {
+      const auth = getAuthContext()
+      if (!auth) throw new Error("Please sign in again.")
+      const response = await fetch(`${API_BASE_URL}/api/v1/speech/check-finbert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({
+          text,
+          receiver_id: "unknown_receiver",
+          currency: "MYR",
+        }),
+      })
+
+      if (!response.ok) {
+        const detail = await response.text()
+        throw new Error(detail || `HTTP ${response.status}`)
+      }
+
+      const data: FinBertCheckResponse = await response.json()
+      const recomputedScore = data.risk_score ?? null
+      const scoreForAgent = recomputedScore ?? score
+      const assessmentForAgent = [
+        data.gemini_assessment,
+        score !== null ? `stt_risk_score=${score}` : "",
+        recomputedScore !== null ? `recomputed_risk_score=${recomputedScore}` : "",
+        data.risk_level ? `recomputed_risk_level=${data.risk_level}` : "",
+        data.overall_pattern_risk !== null && data.overall_pattern_risk !== undefined
+          ? `pattern_risk=${data.overall_pattern_risk}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+      return {
+        score: scoreForAgent,
+        assessment: assessmentForAgent,
+      } satisfies ExternalFinbertData
+    } finally {
+      setIsCheckingFinbert(false)
+    }
+  }, [])
+
+  const transcribeAudio = async (audioBlob: Blob) => {
+    setIsTranscribing(true)
+    setErrorMessage(null)
+
+    try {
+      const wavBlob = await convertToMonoPcmWav(audioBlob, TARGET_SAMPLE_RATE)
+      const audioFile = new File([wavBlob], "recording.wav", { type: "audio/wav" })
+      const formData = new FormData()
+      formData.append("file", audioFile)
+      formData.append("language_code", "en-US")
+      const auth = getAuthContext()
+      if (!auth) throw new Error("Please sign in again.")
+
+      const response = await fetch(`${API_BASE_URL}/api/v1/speech/transcribe`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${auth.token}` },
+        body: formData,
+      })
+      if (!response.ok) {
+        const detail = await response.text()
+        throw new Error(detail || `HTTP ${response.status}`)
+      }
+
+      const data: SpeechToTextResponse = await response.json()
+      const isValidTransfer = data.transfer_validation?.is_valid_complete_transfer === true
+
+      if (!isValidTransfer) {
+        setTransferPrompt(data.text.trim())
+        setPendingFinbert(null)
+        setErrorMessage("Please provide clearer transfer instructions, for example: Send RM 20 to Ali for lunch.")
+        playInvalidStatementTone()
+        return
+      }
+
+      const prompt = data.text.trim()
+      if (!prompt) {
+        setErrorMessage("Transcription returned empty text.")
+        return
+      }
+
+      setTransferPrompt(prompt)
+      const finbert = await checkWithFinBert(prompt, data.fraud_score?.risk_score ?? null)
+      setPendingFinbert(finbert)
+      await submitTransferToAgent(prompt, finbert)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Transcription failed.")
+    } finally {
+      setIsTranscribing(false)
+    }
+  }
+
+  const startRecording = useCallback(async () => {
+    if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setErrorMessage("MediaRecorder is not supported in this browser.")
+      return
+    }
+
+    setErrorMessage(null)
+    setPendingFinbert(null)
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+
+      const mimeType = MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate))
+      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      mediaRecorderRef.current = mediaRecorder
+      chunksRef.current = []
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data)
+        }
+      }
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType || "audio/webm" })
+        await transcribeAudio(audioBlob)
+        cleanupMedia()
+      }
+
+      mediaRecorder.start()
+      setIsRecording(true)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? `Unable to access microphone: ${error.message}` : "Unable to access microphone.")
+      cleanupMedia()
+    }
+  }, [cleanupMedia, transcribeAudio])
+
+  const stopRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current
+    if (!recorder) return
+    if (recorder.state !== "inactive") {
+      recorder.stop()
+    } else {
+      cleanupMedia()
+    }
+    setIsRecording(false)
+  }, [cleanupMedia])
 
   const submitTransferToAgent = useCallback(
     async (overridePrompt?: string, overrideFinbert?: ExternalFinbertData | null) => {
@@ -226,15 +476,18 @@ export function WalletView({
       setFlow("processing-safe")
 
       try {
+        const auth = getAuthContext()
+        if (!auth) throw new Error("Please sign in again.")
+
         const response = await fetch(`${API_BASE_URL}/voice/turn/stream`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
           body: JSON.stringify({
             user_text: prompt,
             thread_id: activeThreadId,
-            user_id: VOICE_USER_ID,
             finbert_score: finbert?.score ?? null,
             finbert_assessment: finbert?.assessment ?? null,
+            ...(auth.userId ? { user_id: auth.userId } : {}),
           }),
         })
         if (!response.ok) {
@@ -255,14 +508,18 @@ export function WalletView({
         }
 
         if (payload.mode === "final") {
-          triggerSafe()
-          setTransferPrompt("")
-          setReviewCard(null)
           setLatestAgentText(payload.assistant_text)
-          setTransferPurpose("")
-          setAgentStep(null)
-          setActiveThreadId(null)
-          setPendingFinbert(null)
+          if (payload.backend_status === "APPROVED" && payload.transfer) {
+            triggerSafe(payload.transfer)
+            setTransferPrompt("")
+            setReviewCard(null)
+            setTransferPurpose("")
+            setActiveThreadId(null)
+            setPendingFinbert(null)
+            return
+          }
+          setFlow("idle")
+          setReviewCard(null)
           return
         }
 
@@ -277,16 +534,7 @@ export function WalletView({
     [activeThreadId, pendingFinbert, transferPrompt, triggerSafe],
   )
 
-  useEffect(() => {
-    const prompt = (externalPrompt ?? "").trim()
-    if (!prompt || prompt === lastAutoPrompt.current) return
-    if (flow === "processing-safe" || flow === "processing-scam") return
-
-    lastAutoPrompt.current = prompt
-    setTransferPrompt(prompt)
-    setPendingFinbert(externalFinbertData ?? null)
-    void submitTransferToAgent(prompt, externalFinbertData ?? null)
-  }, [externalFinbertData, externalPrompt, flow, submitTransferToAgent])
+  useEffect(() => () => cleanupMedia(), [cleanupMedia])
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -318,9 +566,17 @@ export function WalletView({
 
         <SimulationPanel
           flow={flow}
+          isRecording={isRecording}
+          isTranscribing={isTranscribing}
+          isCheckingFinbert={isCheckingFinbert}
           transferPrompt={transferPrompt}
-          setTransferPrompt={setTransferPrompt}
+          setTransferPrompt={(value) => {
+            setTransferPrompt(value)
+            setPendingFinbert(null)
+          }}
           onAnalyze={() => void submitTransferToAgent()}
+          onStartRecording={() => void startRecording()}
+          onStopRecording={() => stopRecording()}
           reviewCard={reviewCard}
           transferPurpose={transferPurpose}
           setTransferPurpose={setTransferPurpose}
@@ -405,9 +661,14 @@ function BalanceCard({
 
 function SimulationPanel({
   flow,
+  isRecording,
+  isTranscribing,
+  isCheckingFinbert,
   transferPrompt,
   setTransferPrompt,
   onAnalyze,
+  onStartRecording,
+  onStopRecording,
   reviewCard,
   transferPurpose,
   setTransferPurpose,
@@ -418,9 +679,14 @@ function SimulationPanel({
   latestAgentText,
 }: {
   flow: FlowState
+  isRecording: boolean
+  isTranscribing: boolean
+  isCheckingFinbert: boolean
   transferPrompt: string
   setTransferPrompt: (value: string) => void
   onAnalyze: () => void
+  onStartRecording: () => void
+  onStopRecording: () => void
   reviewCard: TransferReviewCard | null
   transferPurpose: string
   setTransferPurpose: (value: string) => void
@@ -433,6 +699,7 @@ function SimulationPanel({
   const isProcessingSafe = flow === "processing-safe"
   const isProcessingScam = flow === "processing-scam"
   const isBusy = isProcessingSafe || isProcessingScam
+  const isVoiceBusy = isTranscribing || isCheckingFinbert || isProcessingSafe || isProcessingScam
 
   return (
     <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card p-5 md:p-6">
@@ -450,14 +717,33 @@ function SimulationPanel({
 
       <div className="relative mt-6 rounded-xl border border-primary/20 bg-background/80 p-4 md:p-5">
         <div className="flex flex-col items-center gap-3 text-center">
-          <Button type="button" disabled variant="outline" className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md">
-            <Mic className="h-10 w-10" aria-hidden="true" />
-          </Button>
+          {!isRecording ? (
+            <Button
+              type="button"
+              onClick={onStartRecording}
+              disabled={isVoiceBusy}
+              variant="outline"
+              className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md"
+            >
+              {isTranscribing || isCheckingFinbert ? (
+                <Loader2 className="h-10 w-10 animate-spin" aria-hidden="true" />
+              ) : (
+                <Mic className="h-10 w-10" aria-hidden="true" />
+              )}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              onClick={onStopRecording}
+              variant="destructive"
+              className="h-28 w-28 rounded-full shadow-md"
+            >
+              <Square className="h-10 w-10" aria-hidden="true" />
+            </Button>
+          )}
           <div className="space-y-1">
             <p className="text-sm font-semibold text-foreground">Voice Input</p>
-            <p className="text-xs text-muted-foreground">
-              Use the speech card below to transcribe voice, then it auto-feeds this transfer box.
-            </p>
+            <p className="text-xs text-muted-foreground">Tap to speak. Voice is primary; manual text is optional below.</p>
           </div>
         </div>
 
@@ -482,27 +768,39 @@ function SimulationPanel({
           className="mt-5 flex flex-col gap-2.5 md:flex-row"
           onSubmit={(event) => {
             event.preventDefault()
-            if (!isBusy) onAnalyze()
+            if (!isBusy && !isRecording && !isTranscribing && !isCheckingFinbert) onAnalyze()
           }}
         >
           <Input
             value={transferPrompt}
             onChange={(event) => setTransferPrompt(event.target.value)}
-            disabled={isBusy}
+            disabled={isBusy || isTranscribing || isCheckingFinbert}
             placeholder='e.g. "Send RM 15 to Ali for lunch"'
             className="h-10 md:flex-1"
             aria-label="Transfer request"
           />
-          <Button type="submit" disabled={isBusy || !transferPrompt.trim()} className="h-10 px-5">
+          <Button
+            type="submit"
+            disabled={isBusy || isRecording || isTranscribing || isCheckingFinbert || !transferPrompt.trim()}
+            className="h-10 px-5"
+          >
             {isBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ShieldAlert className="h-4 w-4" aria-hidden="true" />}
             {isBusy ? (agentStep ?? "Checking...") : "Send"}
           </Button>
         </form>
 
-        {isBusy && (
+        {(isBusy || isRecording || isTranscribing || isCheckingFinbert) && (
           <div role="status" aria-live="polite" className="mt-2.5 flex items-center gap-2 px-1">
             <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-            <p className="text-xs text-muted-foreground">{agentStep ?? "Checking your request..."}</p>
+            <p className="text-xs text-muted-foreground">
+              {isRecording
+                ? "Recording..."
+                : isTranscribing
+                  ? "Transcribing speech..."
+                  : isCheckingFinbert
+                    ? "Running FinBert safety check..."
+                    : (agentStep ?? "Checking your request...")}
+            </p>
           </div>
         )}
       </div>
@@ -544,7 +842,7 @@ function statusConfig(status: string): StatusConfig {
 
 function riskDotColor(score: number): string | null {
   if (score >= 70) return "var(--status-blocked)"
-  if (score >= 30) return "var(--status-warned)"
+  if (score >= 40) return "var(--status-warned)"
   return null
 }
 
@@ -743,4 +1041,129 @@ function ReloadModal({
       </div>
     </div>
   )
+}
+
+async function convertToMonoPcmWav(input: Blob, targetSampleRate: number): Promise<Blob> {
+  const arrayBuffer = await input.arrayBuffer()
+  const audioContext = new AudioContext()
+
+  try {
+    const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0))
+    const mono = mixToMono(decoded)
+    const resampled = resampleLinear(mono, decoded.sampleRate, targetSampleRate)
+    const wav = encodePcm16Wav(resampled, targetSampleRate)
+    return new Blob([wav], { type: "audio/wav" })
+  } finally {
+    await audioContext.close()
+  }
+}
+
+function mixToMono(buffer: AudioBuffer): Float32Array {
+  if (buffer.numberOfChannels === 1) {
+    return buffer.getChannelData(0)
+  }
+
+  const length = buffer.length
+  const output = new Float32Array(length)
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const input = buffer.getChannelData(channel)
+    for (let i = 0; i < length; i += 1) {
+      output[i] += input[i]
+    }
+  }
+
+  const gain = 1 / buffer.numberOfChannels
+  for (let i = 0; i < length; i += 1) {
+    output[i] *= gain
+  }
+  return output
+}
+
+function resampleLinear(input: Float32Array, sourceRate: number, targetRate: number): Float32Array {
+  if (sourceRate === targetRate) {
+    return input
+  }
+
+  const ratio = sourceRate / targetRate
+  const outputLength = Math.max(1, Math.round(input.length / ratio))
+  const output = new Float32Array(outputLength)
+
+  for (let i = 0; i < outputLength; i += 1) {
+    const sourcePos = i * ratio
+    const left = Math.floor(sourcePos)
+    const right = Math.min(left + 1, input.length - 1)
+    const frac = sourcePos - left
+    output[i] = input[left] * (1 - frac) + input[right] * frac
+  }
+
+  return output
+}
+
+function encodePcm16Wav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const bytesPerSample = 2
+  const blockAlign = bytesPerSample
+  const byteRate = sampleRate * blockAlign
+  const dataSize = samples.length * bytesPerSample
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+
+  writeAscii(view, 0, "RIFF")
+  view.setUint32(4, 36 + dataSize, true)
+  writeAscii(view, 8, "WAVE")
+  writeAscii(view, 12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, 16, true)
+  writeAscii(view, 36, "data")
+  view.setUint32(40, dataSize, true)
+
+  let offset = 44
+  for (let i = 0; i < samples.length; i += 1) {
+    const s = Math.max(-1, Math.min(1, samples[i]))
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+    offset += bytesPerSample
+  }
+
+  return buffer
+}
+
+function writeAscii(view: DataView, offset: number, text: string) {
+  for (let i = 0; i < text.length; i += 1) {
+    view.setUint8(offset + i, text.charCodeAt(i))
+  }
+}
+
+function playInvalidStatementTone() {
+  const audioContext = new AudioContext()
+  const now = audioContext.currentTime
+
+  const firstOscillator = audioContext.createOscillator()
+  const firstGain = audioContext.createGain()
+  firstOscillator.type = "sine"
+  firstOscillator.frequency.value = 880
+  firstGain.gain.setValueAtTime(0.0001, now)
+  firstGain.gain.exponentialRampToValueAtTime(0.2, now + 0.01)
+  firstGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18)
+  firstOscillator.connect(firstGain).connect(audioContext.destination)
+  firstOscillator.start(now)
+  firstOscillator.stop(now + 0.2)
+
+  const secondOscillator = audioContext.createOscillator()
+  const secondGain = audioContext.createGain()
+  secondOscillator.type = "sine"
+  secondOscillator.frequency.value = 660
+  secondGain.gain.setValueAtTime(0.0001, now + 0.22)
+  secondGain.gain.exponentialRampToValueAtTime(0.2, now + 0.23)
+  secondGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4)
+  secondOscillator.connect(secondGain).connect(audioContext.destination)
+  secondOscillator.start(now + 0.22)
+  secondOscillator.stop(now + 0.42)
+
+  window.setTimeout(() => {
+    void audioContext.close()
+  }, 500)
 }

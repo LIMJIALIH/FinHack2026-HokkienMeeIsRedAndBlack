@@ -17,6 +17,7 @@ export type GraphNode = {
 }
 
 export type GraphEdge = {
+  id: string
   from: string
   to: string
   label: string
@@ -107,7 +108,8 @@ function buildGraph(apiNodes: ApiNode[], apiEdges: ApiEdge[]): { nodes: GraphNod
   const nodeIds = new Set(nodes.map((node) => node.id))
   const edges: GraphEdge[] = apiEdges
     .filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to))
-    .map((e) => ({
+    .map((e, i) => ({
+      id: `${e.from}-${e.to}-${Number(e.amount).toFixed(2)}-${e.status || "unknown"}-${i}`,
       from: e.from,
       to: e.to,
       label: `MYR ${Number(e.amount).toFixed(2)} - ${e.status}`,
@@ -182,7 +184,7 @@ export function FraudGraph() {
               const midX = (a.x + b.x) / 2
               const midY = (a.y + b.y) / 2
               return (
-                <g key={`${edge.from}-${edge.to}`}>
+                <g key={edge.id}>
                   <line
                     x1={a.x}
                     y1={a.y}

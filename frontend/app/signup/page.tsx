@@ -111,6 +111,7 @@ export default function SignupPage() {
       if (!res.ok) throw new Error(json.detail ?? "Signup failed")
 
       localStorage.setItem("auth_token",  json.token)
+      localStorage.setItem("user_id",     json.user_id)
       localStorage.setItem("user_name",   data.full_name)
       localStorage.setItem("user_email",  data.gmail)
       localStorage.setItem("user_phone",  data.phone)

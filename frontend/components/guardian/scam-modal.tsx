@@ -30,7 +30,7 @@ type RiskLevel = "safe" | "caution" | "danger"
 
 function getRiskLevel(score: number): RiskLevel {
   if (score >= 70) return "danger"
-  if (score >= 30) return "caution"
+  if (score >= 40) return "caution"
   return "safe"
 }
 
@@ -199,7 +199,7 @@ export function ScamInterventionCard({
             <XCircle className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
             Reject
           </Button>
-          <Button size="sm" onClick={onProceed} className="text-white" style={{ background: cfg.badgeColor }}>
+          <Button size="sm" onClick={onProceed} className="text-black" style={{ background: cfg.badgeColor }}>
             <ShieldCheck className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
             Accept & Send
           </Button>

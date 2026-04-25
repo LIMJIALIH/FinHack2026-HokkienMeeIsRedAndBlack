@@ -30,6 +30,9 @@ type FinBertCheckResponse = {
   gemini_assessment: string
   fraud_spam_final?: boolean | null
   confidence?: string | null
+  risk_score?: number | null
+  risk_level?: string | null
+  overall_pattern_risk?: number | null
 }
 
 type TranscriptionReadyPayload = {
@@ -40,6 +43,10 @@ type TranscriptionReadyPayload = {
 
 const MIME_CANDIDATES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
 const TARGET_SAMPLE_RATE = 16000
+
+function getAuthToken(): string {
+  return localStorage.getItem("auth_token")?.trim() ?? ""
+}
 
 export function SpeechToTextCard({
   onTranscriptionReady,
@@ -129,6 +136,7 @@ export function SpeechToTextCard({
 
       const response = await fetch(`${apiBaseUrl}/api/v1/speech/transcribe`, {
         method: "POST",
+        headers: { Authorization: `Bearer ${getAuthToken()}` },
         body: formData,
       })
 
@@ -141,8 +149,8 @@ export function SpeechToTextCard({
       const isValidTransfer = data.transfer_validation?.is_valid_complete_transfer === true
 
       if (!isValidTransfer) {
-        setTranscript("invalid statement")
-        setError("invalid statement")
+        setTranscript(data.text)
+        setError("Please provide clearer transfer instructions, for example: Send RM 20 to Ali for lunch.")
         setGeminiAssessment(null)
         playInvalidStatementTone()
         return
@@ -171,10 +179,9 @@ export function SpeechToTextCard({
     try {
       const response = await fetch(`${apiBaseUrl}/api/v1/speech/check-finbert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getAuthToken()}` },
         body: JSON.stringify({
           text: textToCheck,
-          sender_id: "speech_user",
           receiver_id: "unknown_receiver",
           currency: "MYR",
         }),
@@ -188,8 +195,18 @@ export function SpeechToTextCard({
       setGeminiAssessment(data)
       onTranscriptionReady?.({
         text: textToCheck,
-        finbertScore,
-        finbertAssessment: data.gemini_assessment,
+        finbertScore: data.risk_score ?? finbertScore,
+        finbertAssessment: [
+          data.gemini_assessment,
+          finbertScore !== null ? `stt_risk_score=${finbertScore}` : "",
+          data.risk_score !== null && data.risk_score !== undefined ? `recomputed_risk_score=${data.risk_score}` : "",
+          data.risk_level ? `recomputed_risk_level=${data.risk_level}` : "",
+          data.overall_pattern_risk !== null && data.overall_pattern_risk !== undefined
+            ? `pattern_risk=${data.overall_pattern_risk}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
       })
     } catch (err) {
       setError(`FinBert check failed: ${formatError(err)}`)

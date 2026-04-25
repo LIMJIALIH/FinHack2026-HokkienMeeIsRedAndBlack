@@ -43,6 +43,7 @@ export default function LoginPage() {
       if (!res.ok) throw new Error(json.detail ?? "Login failed")
 
       localStorage.setItem("auth_token", json.token)
+      localStorage.setItem("user_id", json.user.id)
       localStorage.setItem("user_name",  json.user.full_name)
       localStorage.setItem("user_email", json.user.gmail)
       localStorage.setItem("kyc_status", json.user.kyc_status)

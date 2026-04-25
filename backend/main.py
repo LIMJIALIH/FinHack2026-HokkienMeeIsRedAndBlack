@@ -9,6 +9,7 @@ import json
 import logging
 from decimal import Decimal
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Optional
 
 import boto3
@@ -27,7 +28,9 @@ from passlib.context import CryptContext
 
 from app.api.v1.router import api_router as v1_api_router
 from app.core.config import Settings
+from app.services.aws_session import build_boto3_session
 from app.services.risk_engine import NeptuneRiskClient, RiskEngine, build_graph
+from app.services.wallet_ledger import WalletLedger
 from app.services.warnings import InMemoryWarningStore
 from transaction_agent import build_main_deep_agent
 
@@ -64,7 +67,22 @@ ALIBABA_CB_URL   = os.getenv("ALIBABA_CALLBACK_URL", "")
 AWS_REGION       = os.getenv("AWS_REGION", "ap-southeast-1")
 DYNAMO_TABLE     = os.getenv("DYNAMO_TABLE", "tng_guardian_users")
 
-NEPTUNE_ENDPOINT = os.getenv("NEPTUNE_ENDPOINT", "db-neptune-2.cluster-cjugq6yyw4j8.ap-southeast-1.neptune.amazonaws.com")
+def _normalize_neptune_endpoint(value: str) -> str:
+    endpoint = (value or "").strip()
+    if "://" in endpoint:
+        endpoint = endpoint.split("://", 1)[1]
+    endpoint = endpoint.split("/", 1)[0]
+    if ":" in endpoint:
+        endpoint = endpoint.split(":", 1)[0]
+    return endpoint.strip()
+
+
+NEPTUNE_ENDPOINT = _normalize_neptune_endpoint(
+    os.getenv(
+        "NEPTUNE_ENDPOINT",
+        "db-neptune-2.cluster-cjugq6yyw4j8.ap-southeast-1.neptune.amazonaws.com",
+    )
+)
 NEPTUNE_PORT     = int(os.getenv("NEPTUNE_PORT", "8182"))
 NEPTUNE_URL      = f"https://{NEPTUNE_ENDPOINT}:{NEPTUNE_PORT}"
 
@@ -108,7 +126,10 @@ risk_engine = RiskEngine(graph_client=graph_client)
 app.state.risk_engine = risk_engine
 app.state.flow_graph = build_graph(risk_engine)
 app.state.warning_store = InMemoryWarningStore()
+app.state.wallet_ledger = WalletLedger(settings=settings)
 app.state.warning_delay_seconds = settings.warning_delay_seconds
+app.state.voice_thread_owners = {}
+app.state.voice_thread_owners_lock = Lock()
 
 try:
     provider = (settings.main_agent_model_provider or "").strip().lower()
@@ -214,11 +235,28 @@ def update_user_kyc(user_id: str, status: str, transaction_id: str = None, verif
 # ── Neptune (openCypher via IAM SigV4) ────────────────────────────────────
 def _neptune_creds() -> Credentials:
     load_dotenv(override=True)
-    return Credentials(
-        os.getenv("AWS_ACCESS_KEY_ID"),
-        os.getenv("AWS_SECRET_ACCESS_KEY"),
-        os.getenv("AWS_SESSION_TOKEN") or None,
+    profile = (
+        os.getenv("NEPTUNE_AWS_PROFILE")
+        or os.getenv("AWS_PROFILE")
+        or None
     )
+    if isinstance(profile, str):
+        profile = profile.strip() or None
+    session = build_boto3_session(region=AWS_REGION, profile=profile)
+
+    sdk_creds = session.get_credentials()
+    if sdk_creds is None:
+        raise RuntimeError(
+            "No AWS credentials found for Neptune. Set NEPTUNE_AWS_PROFILE/AWS_PROFILE or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
+        )
+
+    frozen = sdk_creds.get_frozen_credentials()
+    if not frozen.access_key or not frozen.secret_key:
+        raise RuntimeError(
+            "Incomplete AWS credentials for Neptune. Ensure access key and secret key are available."
+        )
+
+    return Credentials(frozen.access_key, frozen.secret_key, frozen.token or None)
 
 
 def neptune_run(cypher: str, params: dict = None) -> dict:

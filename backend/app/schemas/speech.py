@@ -57,6 +57,9 @@ class FinBertCheckResponse(BaseModel):
     gemini_assessment: str
     fraud_spam_final: bool | None = None
     confidence: str | None = None
+    risk_score: float | None = None
+    risk_level: str | None = None
+    overall_pattern_risk: float | None = None
 
 
 class SpeechToTextResponse(BaseModel):
