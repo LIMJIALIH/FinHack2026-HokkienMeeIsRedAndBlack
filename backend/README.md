@@ -43,6 +43,7 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 - `GET /healthz`
 - `POST /risk/check`
+- `POST /risk/graph`
 - `POST /transfer/evaluate`
 - `POST /transfer/warning/confirm`
 
@@ -63,3 +64,16 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 If `decision=WARNING`, call `/transfer/warning/confirm` with `confirmed=true`.
 The API enforces a 30-second cooling-off delay before it returns `APPROVED_AFTER_WARNING`.
+
+## Internal graph agent
+
+`backend/agent/graph_agent.py` provides an internal Deep Agent for graph risk analysis:
+
+- `build_graph_deep_agent()`
+- `run_graph_turn()`
+- `run_graph_transaction_analysis()`
+
+The graph tools are in `backend/agent/graph_tools.py` and call the same `RiskEngine` path used by the API, with the existing settings-based backend selection:
+
+- `USE_MOCK_GRAPH=true` (default) uses mock graph data.
+- `USE_MOCK_GRAPH=false` with `NEPTUNE_ENDPOINT` uses Neptune.

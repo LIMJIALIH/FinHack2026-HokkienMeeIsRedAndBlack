@@ -8,14 +8,14 @@ import {
   Eye,
   EyeOff,
   Loader2,
-  RotateCcw,
-  Send,
+  Mic,
   ShieldAlert,
   Sparkles,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { ScamInterventionModal } from "@/components/guardian/scam-modal"
 import type { Transaction } from "@/app/page"
 import { cn } from "@/lib/utils"
@@ -28,10 +28,76 @@ type WalletViewProps = {
   onSafeTransfer: () => void
   onScamCanceled: () => void
   onScamProceed: () => void
-  onReset: () => void
 }
 
 type FlowState = "idle" | "processing-safe" | "scam-detected" | "processing-scam" | "success-safe"
+
+type TransferReviewCard = {
+  card_type: "transfer_review"
+  title: string
+  subtitle: string
+  decision_preview: "APPROVED" | "WARNING" | "INTERVENTION_REQUIRED"
+  risk_score: number
+  reason_codes: string[]
+  evidence_refs: string[]
+  warning_id: string | null
+  warning_delay_seconds: number | null
+  purpose_question: string
+}
+
+type VoiceTurnResponse = {
+  thread_id: string
+  mode: "hitl_required" | "final"
+  assistant_text: string
+  card: TransferReviewCard | null
+  backend_status: string | null
+  steps: string[]
+}
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+
+async function readVoiceStream(
+  body: ReadableStream<Uint8Array>,
+  onStep: (summary: string) => void,
+): Promise<VoiceTurnResponse> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let finalPayload: VoiceTurnResponse | null = null
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split("\n\n")
+    buffer = events.pop() ?? ""
+
+    for (const eventText of events) {
+      const dataLine = eventText.split("\n").find((line) => line.startsWith("data: "))
+      if (!dataLine) continue
+      const event = JSON.parse(dataLine.slice(6)) as {
+        event: "step" | "final" | "error"
+        summary?: string
+        message?: string
+        payload?: VoiceTurnResponse
+      }
+      if (event.event === "step" && event.summary) {
+        onStep(event.summary)
+      }
+      if (event.event === "error") {
+        throw new Error(event.message ?? "Voice agent stream failed.")
+      }
+      if (event.event === "final" && event.payload) {
+        finalPayload = event.payload
+      }
+    }
+  }
+
+  if (!finalPayload) {
+    throw new Error("Voice agent did not return a final response.")
+  }
+  return finalPayload
+}
 
 export function WalletView({
   balance,
@@ -41,33 +107,141 @@ export function WalletView({
   onSafeTransfer,
   onScamCanceled,
   onScamProceed,
-  onReset,
 }: WalletViewProps) {
   const [flow, setFlow] = useState<FlowState>("idle")
   const [showBalance, setShowBalance] = useState(true)
+  const [transferPrompt, setTransferPrompt] = useState("")
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
+  const [reviewCard, setReviewCard] = useState<TransferReviewCard | null>(null)
+  const [latestAgentText, setLatestAgentText] = useState("")
+  const [agentStep, setAgentStep] = useState<string | null>(null)
+  const [transferPurpose, setTransferPurpose] = useState("")
 
   const triggerSafe = () => {
-    setFlow("processing-safe")
-    setTimeout(() => {
-      onSafeTransfer()
-      setFlow("success-safe")
-      setTimeout(() => setFlow("idle"), 1600)
-    }, 700)
+    onSafeTransfer()
+    setFlow("success-safe")
+    setTimeout(() => setFlow("idle"), 1600)
   }
 
-  const triggerScam = () => {
-    setFlow("processing-scam")
-    setTimeout(() => setFlow("scam-detected"), 800)
-  }
-
-  const handleCancel = () => {
+  const handleCancel = async () => {
+    setErrorMessage(null)
+    if (activeThreadId) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/voice/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ thread_id: activeThreadId, decision: "reject", purpose: transferPurpose }),
+        })
+        if (!response.ok) {
+          throw new Error("Unable to reject transfer decision.")
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+      }
+    }
     onScamCanceled()
+    setReviewCard(null)
+    setLatestAgentText("")
+    setTransferPurpose("")
+    setActiveThreadId(null)
     setFlow("idle")
   }
 
-  const handleProceed = () => {
+  const handleProceed = async () => {
+    setErrorMessage(null)
+    if (activeThreadId) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/voice/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ thread_id: activeThreadId, decision: "approve", purpose: transferPurpose }),
+        })
+        if (!response.ok) {
+          throw new Error("Unable to approve transfer decision.")
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+      }
+    }
     onScamProceed()
+    setReviewCard(null)
+    setLatestAgentText("")
+    setTransferPurpose("")
+    setActiveThreadId(null)
     setFlow("idle")
+  }
+
+  const submitTransferToAgent = async () => {
+    const prompt = transferPrompt.trim()
+    if (!prompt) return
+
+    setErrorMessage(null)
+    setLatestAgentText("")
+    setAgentStep("Analysing transfer request")
+    setFlow("processing-safe")
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/voice/turn/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_text: prompt,
+          thread_id: activeThreadId,
+        }),
+      })
+      if (!response.ok) {
+        throw new Error("Voice agent request failed.")
+      }
+      if (!response.body) {
+        throw new Error("Voice agent stream was empty.")
+      }
+      const payload = await readVoiceStream(response.body, (summary) => setAgentStep(summary))
+      setActiveThreadId(payload.thread_id)
+      setLatestAgentText(payload.assistant_text)
+
+      if (payload.mode === "hitl_required" && payload.card) {
+        setReviewCard(payload.card)
+        if (payload.card.decision_preview === "APPROVED") {
+          const approveResponse = await fetch(`${API_BASE_URL}/voice/decision`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ thread_id: payload.thread_id, decision: "approve" }),
+          })
+          if (!approveResponse.ok) {
+            throw new Error("Failed to finalize approved transfer.")
+          }
+          triggerSafe()
+          setTransferPrompt("")
+          setReviewCard(null)
+          setLatestAgentText("")
+          setTransferPurpose("")
+          setAgentStep(null)
+          setActiveThreadId(null)
+          return
+        }
+        setFlow("scam-detected")
+        return
+      }
+
+      if (payload.mode === "final") {
+        triggerSafe()
+        setTransferPrompt("")
+        setReviewCard(null)
+        setLatestAgentText(payload.assistant_text)
+        setTransferPurpose("")
+        setAgentStep(null)
+        setActiveThreadId(null)
+        return
+      }
+
+      throw new Error("Unexpected response from voice agent.")
+    } catch (error) {
+      setFlow("idle")
+      setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+    } finally {
+      setAgentStep(null)
+    }
   }
 
   return (
@@ -103,12 +277,12 @@ export function WalletView({
 
         <SimulationPanel
           flow={flow}
-          onSafe={triggerSafe}
-          onScam={triggerScam}
-          onReset={() => {
-            onReset()
-            setFlow("idle")
-          }}
+          transferPrompt={transferPrompt}
+          setTransferPrompt={setTransferPrompt}
+          onAnalyze={submitTransferToAgent}
+          errorMessage={errorMessage}
+          agentStep={agentStep}
+          latestAgentText={latestAgentText}
         />
 
         <RecentTransactions transactions={transactions} />
@@ -123,6 +297,10 @@ export function WalletView({
       {/* Modal overlays */}
       <ScamInterventionModal
         open={flow === "scam-detected"}
+        card={reviewCard}
+        assistantText={latestAgentText}
+        purpose={transferPurpose}
+        onPurposeChange={setTransferPurpose}
         onCancel={handleCancel}
         onProceed={handleProceed}
       />
@@ -191,77 +369,86 @@ function BalanceCard({
 
 function SimulationPanel({
   flow,
-  onSafe,
-  onScam,
-  onReset,
+  transferPrompt,
+  setTransferPrompt,
+  onAnalyze,
+  errorMessage,
+  agentStep,
+  latestAgentText,
 }: {
   flow: FlowState
-  onSafe: () => void
-  onScam: () => void
-  onReset: () => void
+  transferPrompt: string
+  setTransferPrompt: (value: string) => void
+  onAnalyze: () => void
+  errorMessage: string | null
+  agentStep: string | null
+  latestAgentText: string
 }) {
   const isProcessingSafe = flow === "processing-safe"
   const isProcessingScam = flow === "processing-scam"
   const isBusy = isProcessingSafe || isProcessingScam
 
   return (
-    <Card className="p-5 md:p-6">
+    <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card p-5 md:p-6">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -right-14 -top-14 h-44 w-44 rounded-full bg-primary/10 blur-2xl"
+      />
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-foreground">Transfer Simulation</h2>
-          <span className="text-xs font-medium text-muted-foreground">Demo Controls</span>
+          <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+            Voice-first Preview
+          </span>
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Trigger a sample transfer to see the wallet flow and the AI Scam-Breaker engine in action.
+          Type a transfer request. The Deep Agent will inspect contacts, user nodes, and transfer edges before deciding.
         </p>
       </div>
 
-      <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <Button
-          onClick={onSafe}
-          disabled={isBusy}
-          className="h-auto justify-start gap-3 bg-primary py-3 text-left text-primary-foreground hover:bg-primary/90"
-        >
-          {isProcessingSafe ? (
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
-          ) : (
-            <Send className="h-4 w-4 shrink-0" aria-hidden="true" />
-          )}
-          <span className="flex flex-col">
-            <span className="text-sm font-semibold">Simulate Safe Transfer</span>
-            <span className="text-xs font-normal opacity-80">RM 15 to Ali · Lunch</span>
-          </span>
-        </Button>
+      <div className="relative mt-6 rounded-xl border border-primary/20 bg-background/80 p-4 md:p-5">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <Button
+            type="button"
+            disabled
+            variant="outline"
+            className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md"
+            aria-label="Voice transfer input coming soon"
+          >
+            <Mic className="h-10 w-10" aria-hidden="true" />
+          </Button>
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-foreground">Voice Transfer Input</p>
+            <p className="text-xs text-muted-foreground">
+              Latest request is shown here only; chat history is intentionally not accumulated.
+            </p>
+          </div>
+        </div>
 
-        <Button
-          onClick={onScam}
-          disabled={isBusy}
-          variant="outline"
-          className="h-auto justify-start gap-3 border-destructive/40 py-3 text-left text-destructive hover:bg-destructive/5 hover:text-destructive"
+        <form
+          className="mt-5 flex flex-col gap-2.5 md:flex-row"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!isBusy) onAnalyze()
+          }}
         >
-          {isProcessingScam ? (
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
-          ) : (
-            <ShieldAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
-          )}
-          <span className="flex flex-col">
-            <span className="text-sm font-semibold">Simulate Scam Transfer</span>
-            <span className="text-xs font-normal opacity-80">RM 1,000 to Investment Agent</span>
-          </span>
-        </Button>
-
-        <Button
-          onClick={onReset}
-          disabled={isBusy}
-          variant="ghost"
-          className="h-auto justify-start gap-3 py-3 text-left text-muted-foreground hover:text-foreground"
-        >
-          <RotateCcw className="h-4 w-4 shrink-0" aria-hidden="true" />
-          <span className="flex flex-col">
-            <span className="text-sm font-semibold">Reset Wallet</span>
-            <span className="text-xs font-normal opacity-80">Restore initial state</span>
-          </span>
-        </Button>
+          <Input
+            value={transferPrompt}
+            onChange={(event) => setTransferPrompt(event.target.value)}
+            disabled={isBusy}
+            placeholder='Type transfer request, e.g. "Send RM 15 to Ali for lunch"'
+            className="h-10 md:flex-1"
+            aria-label="Transfer instruction input"
+          />
+          <Button type="submit" disabled={isBusy || !transferPrompt.trim()} className="h-10 px-5">
+            {isBusy ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+            )}
+            Analyze
+          </Button>
+        </form>
       </div>
 
       {isBusy && (
@@ -271,11 +458,18 @@ function SimulationPanel({
           className="mt-5 flex items-center gap-3 rounded-md border border-border bg-secondary px-3 py-2.5"
         >
           <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
-          <p className="text-sm text-foreground">
-            {isProcessingSafe
-              ? "Authorising transfer · running 1-hop graph check (~100 ms)…"
-              : "Authorising transfer · BERT intent + Neptune mule lookup running…"}
-          </p>
+          <p className="text-sm text-foreground">{agentStep ?? "Analysing transfer request"}</p>
+        </div>
+      )}
+      {!isBusy && latestAgentText && (
+        <div className="mt-5 rounded-md border border-border bg-secondary px-3 py-2.5">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Latest agent message</p>
+          <p className="mt-1 text-sm leading-relaxed text-foreground">{latestAgentText}</p>
+        </div>
+      )}
+      {errorMessage && (
+        <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {errorMessage}
         </div>
       )}
     </Card>

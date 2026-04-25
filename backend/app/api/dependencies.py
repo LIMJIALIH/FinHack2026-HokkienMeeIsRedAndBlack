@@ -16,3 +16,7 @@ def get_flow_graph(request: Request) -> Any:
 
 def get_warning_store(request: Request) -> InMemoryWarningStore:
     return request.app.state.warning_store
+
+
+def get_main_agent(request: Request):
+    return request.app.state.main_agent

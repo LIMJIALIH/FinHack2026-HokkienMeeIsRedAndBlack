@@ -8,6 +8,9 @@ from app.schemas.transfer import Decision
 @dataclass
 class WarningState:
     warning_id: str
+    transaction_id: str
+    user_id: str
+    recipient_id: str
     created_at: float
     approved_at: float | None = None
     decision: Decision = "WARNING"
@@ -41,4 +44,3 @@ class InMemoryWarningStore:
                 return False, wait_left
             state.approved_at = timestamp
             return True, 0
-

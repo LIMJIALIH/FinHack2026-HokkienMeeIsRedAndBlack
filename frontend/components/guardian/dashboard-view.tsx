@@ -74,7 +74,7 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
             <div>
               <h2 className="text-base font-semibold text-foreground">Blocked Fraud Ring</h2>
               <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                Node-link view of the relationship Neptune flagged when Ahmad attempted to send RM 1,000.
+                Node-link view of the relationship Neptune flagged when Marcus attempted to send RM 1,000.
               </p>
             </div>
             <div className="flex items-center gap-3 text-xs">
@@ -97,7 +97,7 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
 
           <dl className="mt-4 grid grid-cols-3 gap-x-3 gap-y-2.5 text-sm">
             <STRRow label="Reporting FI" value="Touch 'n Go Digital Sdn Bhd" />
-            <STRRow label="Customer" value="Ahmad Bin Ali · ****6721" />
+            <STRRow label="Customer" value="Marcus Tan · ****6721" />
             <STRRow label="Amount" value="RM 1,000.00" mono />
             <STRRow label="Counterparty" value="Investment Agent · ****9024" />
             <STRRow label="Channel" value="P2P Wallet Transfer" />

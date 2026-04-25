@@ -81,12 +81,6 @@ export default function Page() {
     setBalance((prev) => prev - 1000)
   }
 
-  const handleReset = () => {
-    setBalance(INITIAL_BALANCE)
-    setTransactions(INITIAL_TRANSACTIONS)
-    setLastBlocked(null)
-  }
-
   return (
     <main className="min-h-screen bg-background">
       <TopNav view={view} onViewChange={setView} />
@@ -100,7 +94,6 @@ export default function Page() {
             onSafeTransfer={handleSafeTransfer}
             onScamCanceled={handleScamCanceled}
             onScamProceed={handleScamProceed}
-            onReset={handleReset}
           />
         ) : (
           <DashboardView protectedAmount={protectedAmount} threatsBlocked={threatsBlocked} />
