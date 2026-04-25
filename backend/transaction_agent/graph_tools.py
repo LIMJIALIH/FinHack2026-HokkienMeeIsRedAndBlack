@@ -54,13 +54,13 @@ def _emit_progress(status: str, detail: str) -> None:
 
 def _build_risk_engine() -> RiskEngine:
     settings = Settings()
-    graph_client = None
-    if settings.neptune_endpoint:
-        graph_client = NeptuneRiskClient(
-            endpoint=settings.neptune_endpoint,
-            region=settings.aws_region,
-            profile=settings.aws_profile or None,
-        )
+    if not settings.neptune_endpoint:
+        raise RuntimeError("NEPTUNE_ENDPOINT is required. Mock graph mode has been removed.")
+    graph_client = NeptuneRiskClient(
+        endpoint=settings.neptune_endpoint,
+        region=settings.aws_region,
+        profile=settings.aws_profile or None,
+    )
     return RiskEngine(graph_client=graph_client)
 
 
@@ -228,68 +228,6 @@ def get_transfer_edges_info_tool(
                 "error": f"neptune_edge_lookup_failed: {exc}",
             }
 
-    if settings.use_mock_graph:
-        edges_by_pair = {
-            ("user:marcus", "user:ali"): [
-                {
-                    "~id": "tx:mock_ali_001",
-                    "tx_time": "2026-04-21T09:10:00Z",
-                    "amount": 12.5,
-                    "currency": "MYR",
-                    "message_text": "lunch",
-                    "tx_note": "food",
-                    "channel": "wallet_app",
-                    "status": "approved",
-                    "finbert_score": 0,
-                    "emotion_score": 0,
-                    "risk_score_latest": 12,
-                    "risk_reason_codes": "[]",
-                    "updated_at": 1776900000,
-                },
-                {
-                    "~id": "tx:mock_ali_002",
-                    "tx_time": "2026-04-23T15:30:00Z",
-                    "amount": 2,
-                    "currency": "MYR",
-                    "message_text": "teh ais",
-                    "tx_note": None,
-                    "channel": "wallet_app",
-                    "status": "approved",
-                    "finbert_score": 0,
-                    "emotion_score": 0,
-                    "risk_score_latest": 8,
-                    "risk_reason_codes": "[]",
-                    "updated_at": 1777000000,
-                },
-            ],
-            ("user:marcus", "user:investment_agent"): [
-                {
-                    "~id": "tx:mock_inv_001",
-                    "tx_time": "2026-04-22T10:00:00Z",
-                    "amount": 1000,
-                    "currency": "MYR",
-                    "message_text": "guaranteed return deposit",
-                    "tx_note": "telegram investment",
-                    "channel": "wallet_app",
-                    "status": "warned",
-                    "finbert_score": 92,
-                    "emotion_score": 88,
-                    "risk_score_latest": 82,
-                    "risk_reason_codes": "[\"high_risk_summary\", \"warned_history\"]",
-                    "updated_at": 1777000000,
-                }
-            ],
-        }
-        edges = edges_by_pair.get((source_graph_id, target_graph_id), [])
-        return {
-            "source_user_id": source_user_id,
-            "target_user_id": target_user_id,
-            "schema": "(:User)-[:TRANSFERRED_TO]->(:User)",
-            "fields": TRANSFER_EDGE_FIELDS,
-            "edges": edges[:safe_limit],
-            "source": "mock",
-        }
-
     return {
         "source_user_id": source_user_id,
         "target_user_id": target_user_id,
@@ -297,6 +235,7 @@ def get_transfer_edges_info_tool(
         "fields": TRANSFER_EDGE_FIELDS,
         "edges": [],
         "source": "none",
+        "error": "neptune_not_configured",
     }
 
 
@@ -358,28 +297,12 @@ def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) ->
                 "error": f"neptune_overview_failed: {exc}",
             }
 
-    if settings.use_mock_graph:
-        return {
-            "source": "mock",
-            "counts": {"users": 4, "transfers": 3},
-            "sample_users": [
-                {"graph_id": "user:marcus", "name": "Marcus", "risk_tier_current": "low"},
-                {"graph_id": "user:ali", "name": "Ali", "risk_tier_current": "low"},
-                {"graph_id": "user:investment_agent", "name": "Investment Agent", "risk_tier_current": "high"},
-                {"graph_id": "user:siti", "name": "Siti", "risk_tier_current": "medium"},
-            ][:safe_user_limit],
-            "sample_transfers": [
-                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 12.5, "currency": "MYR"},
-                {"source_id": "user:marcus", "target_id": "user:ali", "amount": 2.0, "currency": "MYR"},
-                {"source_id": "user:marcus", "target_id": "user:investment_agent", "amount": 1000.0, "currency": "MYR"},
-            ][:safe_edge_limit],
-        }
-
     return {
         "source": "none",
         "counts": {"users": 0, "transfers": 0},
         "sample_users": [],
         "sample_transfers": [],
+        "error": "neptune_not_configured",
     }
 
 

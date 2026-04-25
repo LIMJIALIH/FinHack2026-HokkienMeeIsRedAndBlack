@@ -6,7 +6,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_risk_graph_mock_payload_shape() -> None:
+def test_risk_graph_payload_shape() -> None:
     response = client.post(
         "/risk/graph",
         json={
@@ -25,4 +25,4 @@ def test_risk_graph_mock_payload_shape() -> None:
     assert isinstance(body["risk_score"], int)
     assert isinstance(body["nodes"], list)
     assert isinstance(body["edges"], list)
-    assert body["stats"]["source"] in {"mock", "neptune", "error", "none", "unknown"}
+    assert body["stats"]["source"] in {"neptune", "error", "none", "unknown"}

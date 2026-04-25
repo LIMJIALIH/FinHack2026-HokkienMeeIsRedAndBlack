@@ -73,7 +73,7 @@ The API enforces a 30-second cooling-off delay before it returns `APPROVED_AFTER
 - `run_graph_turn()`
 - `run_graph_transaction_analysis()`
 
-The graph tools are in `backend/agent/graph_tools.py` and call the same `RiskEngine` path used by the API, with the existing settings-based backend selection:
+The graph tools are in `backend/agent/graph_tools.py` and call the same `RiskEngine` path used by the API.
 
-- `USE_MOCK_GRAPH=true` (default) uses mock graph data.
-- `USE_MOCK_GRAPH=false` with `NEPTUNE_ENDPOINT` uses Neptune.
+- `NEPTUNE_ENDPOINT` is required.
+- Mock graph mode has been removed.

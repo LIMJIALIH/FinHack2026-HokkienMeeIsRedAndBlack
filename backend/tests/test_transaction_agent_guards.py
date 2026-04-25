@@ -25,7 +25,7 @@ def test_build_review_card_low_risk() -> None:
         "message": "lunch money",
         "risk_score": 10,
         "reason_codes": [],
-        "evidence_refs": ["user:ali", "tx:mock_ali_001"],
+        "evidence_refs": ["user:ali", "tx:sample_ali_001"],
         "assistant_text": "Transfer looks safe.",
     }
     card = _build_review_card(tool_args)
@@ -102,7 +102,6 @@ def test_extract_tool_args_returns_none_for_unrelated_interrupt() -> None:
 
 def test_neptune_contact_search_queries_name_and_id(monkeypatch) -> None:
     class StubSettings:
-        use_mock_graph = False
         neptune_endpoint = "dummy.neptune.amazonaws.com"
         aws_profile = ""
         aws_region = "ap-southeast-1"

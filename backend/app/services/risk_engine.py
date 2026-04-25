@@ -203,89 +203,8 @@ class NeptuneRiskClient:
         response = self._client.execute_open_cypher_query(openCypherQuery=query, parameters=json.dumps(params))
         return bool(response.get("results", []))
 
-class MockGraphRiskClient:
-    def __init__(self, assumed_user_id: str = "marcus") -> None:
-        sender = _to_graph_user_id(assumed_user_id)
-        self._stats_by_pair: dict[tuple[str, str], dict[str, int]] = {
-            (sender, "user:investment_agent"): {"tx_count": 24, "max_risk_score": 82, "flagged_tx_count": 5},
-            (sender, "user:ali"): {"tx_count": 8, "max_risk_score": 18, "flagged_tx_count": 0},
-        }
-        self._transfer_index: dict[str, tuple[str, str, str]] = {}
-
-    def fetch_graph_risk(self, user_id: str, recipient_id: str) -> tuple[int, list[str], list[str], int]:
-        sender_graph_id = _to_graph_user_id(user_id)
-        recipient_graph_id = _to_graph_user_id(recipient_id)
-        stats = self._stats_by_pair.get((sender_graph_id, recipient_graph_id))
-        if stats is None:
-            stats = {"tx_count": 0, "max_risk_score": 0, "flagged_tx_count": 0}
-        tx_count = int(stats.get("tx_count", 0))
-        max_risk_score = int(stats.get("max_risk_score", 0))
-        flagged_tx_count = int(stats.get("flagged_tx_count", 0))
-        score, reasons = _graph_risk_from_stats(
-            tx_count=tx_count,
-            max_risk_score=max_risk_score,
-            flagged_tx_count=flagged_tx_count,
-        )
-        evidence = [
-            "graph:source=mock",
-            f"graph:tx_count={tx_count}",
-            f"graph:max_risk_score={max_risk_score}",
-            f"graph:flagged_tx_count={flagged_tx_count}",
-        ]
-        return score, reasons, evidence, 3
-
-    def upsert_transfer(
-        self,
-        sender_user_id: str,
-        recipient_user_id: str,
-        transaction_id: str,
-        tx_time: str,
-        amount: float,
-        currency: str,
-        message_text: str,
-        tx_note: str | None,
-        channel: str,
-        status: str,
-        finbert_score: int,
-        emotion_score: int,
-        risk_score_latest: int,
-        risk_reason_codes: list[str],
-        risk_decision: str,
-        requires_hitl: bool,
-        updated_at_epoch: int,
-    ) -> None:
-        del tx_time, amount, currency, message_text, tx_note, channel, finbert_score, emotion_score, risk_reason_codes, risk_decision, requires_hitl, updated_at_epoch
-        sender_graph_id = _to_graph_user_id(sender_user_id)
-        recipient_graph_id = _to_graph_user_id(recipient_user_id)
-        key = (sender_graph_id, recipient_graph_id)
-        stats = self._stats_by_pair.setdefault(key, {"tx_count": 0, "max_risk_score": 0, "flagged_tx_count": 0})
-        stats["tx_count"] += 1
-        stats["max_risk_score"] = max(int(stats["max_risk_score"]), int(risk_score_latest))
-        if status in {"warned", "blocked", "reversed"}:
-            stats["flagged_tx_count"] += 1
-        self._transfer_index[transaction_id] = (sender_graph_id, recipient_graph_id, status)
-
-    def update_transfer_status(self, transaction_id: str, status: str, updated_at_epoch: int) -> bool:
-        del updated_at_epoch
-        current = self._transfer_index.get(transaction_id)
-        if current is None:
-            return False
-        sender_graph_id, recipient_graph_id, prev_status = current
-        key = (sender_graph_id, recipient_graph_id)
-        stats = self._stats_by_pair.setdefault(key, {"tx_count": 0, "max_risk_score": 0, "flagged_tx_count": 0})
-
-        prev_flagged = prev_status in {"warned", "blocked", "reversed"}
-        new_flagged = status in {"warned", "blocked", "reversed"}
-        if prev_flagged and not new_flagged:
-            stats["flagged_tx_count"] = max(0, int(stats["flagged_tx_count"]) - 1)
-        elif not prev_flagged and new_flagged:
-            stats["flagged_tx_count"] += 1
-        self._transfer_index[transaction_id] = (sender_graph_id, recipient_graph_id, status)
-        return True
-
-
 class RiskEngine:
-    def __init__(self, graph_client: NeptuneRiskClient | MockGraphRiskClient | None) -> None:
+    def __init__(self, graph_client: NeptuneRiskClient | None) -> None:
         self._graph_client = graph_client
 
     def evaluate(self, payload: TransferEvaluateRequest) -> RiskCheckResult:
@@ -415,7 +334,7 @@ class RiskEngine:
             RiskGraphNode(
                 id="ip",
                 label="Shared IP",
-                sublabel="Mock IP relation",
+                sublabel="Observed relation",
                 x=360,
                 y=310,
                 kind="flagged" if flagged_tx_count > 0 else "neutral",
