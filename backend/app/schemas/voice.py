@@ -27,6 +27,8 @@ class VoiceTurnRequest(BaseModel):
     user_text: str = Field(min_length=1, max_length=2000)
     thread_id: str | None = Field(default=None, min_length=1, max_length=128)
     user_id: str = Field(min_length=1, max_length=128)
+    finbert_score: float | None = None
+    finbert_assessment: str | None = None
 
 
 class VoiceDecisionRequest(BaseModel):

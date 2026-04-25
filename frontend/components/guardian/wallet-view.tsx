@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -11,6 +11,7 @@ import {
   EyeOff,
   Loader2,
   Mic,
+  PlusCircle,
   Radio,
   RotateCcw,
   ShieldAlert,
@@ -19,7 +20,6 @@ import {
   Sparkles,
   TriangleAlert,
   X,
-  XCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -27,6 +27,13 @@ import { Input } from "@/components/ui/input"
 import { ScamInterventionCard } from "@/components/guardian/scam-modal"
 import type { Transaction } from "@/app/page"
 import { cn } from "@/lib/utils"
+
+const RELOAD_OPTIONS = [10, 20, 30, 50, 100, 200]
+
+type ExternalFinbertData = {
+  score?: number | null
+  assessment?: string | null
+}
 
 type WalletViewProps = {
   balance: number
@@ -36,6 +43,11 @@ type WalletViewProps = {
   onSafeTransfer: () => void
   onScamCanceled: () => void
   onScamProceed: () => void
+  onReset: () => void
+  onReload?: (amount: number) => Promise<void>
+  userName?: string
+  externalPrompt?: string | null
+  externalFinbertData?: ExternalFinbertData | null
 }
 
 type FlowState = "idle" | "processing-safe" | "scam-detected" | "processing-scam" | "success-safe"
@@ -116,9 +128,15 @@ export function WalletView({
   onSafeTransfer,
   onScamCanceled,
   onScamProceed,
+  onReset,
+  onReload,
+  userName,
+  externalPrompt,
+  externalFinbertData,
 }: WalletViewProps) {
   const [flow, setFlow] = useState<FlowState>("idle")
   const [showBalance, setShowBalance] = useState(true)
+  const [showReload, setShowReload] = useState(false)
   const [transferPrompt, setTransferPrompt] = useState("")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
@@ -126,14 +144,16 @@ export function WalletView({
   const [latestAgentText, setLatestAgentText] = useState("")
   const [agentStep, setAgentStep] = useState<string | null>(null)
   const [transferPurpose, setTransferPurpose] = useState("")
+  const [pendingFinbert, setPendingFinbert] = useState<ExternalFinbertData | null>(null)
+  const lastAutoPrompt = useRef("")
 
-  const triggerSafe = () => {
+  const triggerSafe = useCallback(() => {
     onSafeTransfer()
     setFlow("success-safe")
     setTimeout(() => setFlow("idle"), 1600)
-  }
+  }, [onSafeTransfer])
 
-  const handleCancel = async () => {
+  const handleCancel = useCallback(async () => {
     setErrorMessage(null)
     setFlow("processing-scam")
     if (activeThreadId) {
@@ -161,9 +181,9 @@ export function WalletView({
     setTransferPurpose("")
     setActiveThreadId(null)
     setFlow("idle")
-  }
+  }, [activeThreadId, onScamCanceled, reviewCard?.warning_id, transferPurpose])
 
-  const handleProceed = async () => {
+  const handleProceed = useCallback(async () => {
     setErrorMessage(null)
     setFlow("processing-scam")
     if (activeThreadId) {
@@ -191,68 +211,87 @@ export function WalletView({
     setTransferPurpose("")
     setActiveThreadId(null)
     setFlow("idle")
-  }
+  }, [activeThreadId, onScamProceed, reviewCard?.warning_id, transferPurpose])
 
-  const submitTransferToAgent = async () => {
-    const prompt = transferPrompt.trim()
-    if (!prompt) return
+  const submitTransferToAgent = useCallback(
+    async (overridePrompt?: string, overrideFinbert?: ExternalFinbertData | null) => {
+      const prompt = (overridePrompt ?? transferPrompt).trim()
+      if (!prompt) return
 
-    setErrorMessage(null)
-    setLatestAgentText("")
-    setAgentStep("Analysing transfer request")
-    setFlow("processing-safe")
+      const finbert = overrideFinbert ?? pendingFinbert
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/voice/turn/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_text: prompt,
-          thread_id: activeThreadId,
-          user_id: VOICE_USER_ID,
-        }),
-      })
-      if (!response.ok) {
-        throw new Error("Voice agent request failed.")
-      }
-      if (!response.body) {
-        throw new Error("Voice agent stream was empty.")
-      }
-      const payload = await readVoiceStream(response.body, (summary) => setAgentStep(summary))
-      setActiveThreadId(payload.thread_id)
-      setLatestAgentText(payload.assistant_text)
+      setErrorMessage(null)
+      setLatestAgentText("")
+      setAgentStep("Analyzing transfer request")
+      setFlow("processing-safe")
 
-      if (payload.mode === "hitl_required" && payload.card) {
-        setReviewCard(payload.card)
-        setFlow("scam-detected")
-        return
-      }
+      try {
+        const response = await fetch(`${API_BASE_URL}/voice/turn/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_text: prompt,
+            thread_id: activeThreadId,
+            user_id: VOICE_USER_ID,
+            finbert_score: finbert?.score ?? null,
+            finbert_assessment: finbert?.assessment ?? null,
+          }),
+        })
+        if (!response.ok) {
+          throw new Error("Voice agent request failed.")
+        }
+        if (!response.body) {
+          throw new Error("Voice agent stream was empty.")
+        }
 
-      if (payload.mode === "final") {
-        triggerSafe()
-        setTransferPrompt("")
-        setReviewCard(null)
+        const payload = await readVoiceStream(response.body, (summary) => setAgentStep(summary))
+        setActiveThreadId(payload.thread_id)
         setLatestAgentText(payload.assistant_text)
-        setTransferPurpose("")
-        setAgentStep(null)
-        setActiveThreadId(null)
-        return
-      }
 
-      throw new Error("Unexpected response from voice agent.")
-    } catch (error) {
-      setFlow("idle")
-      setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
-    } finally {
-      setAgentStep(null)
-    }
-  }
+        if (payload.mode === "hitl_required" && payload.card) {
+          setReviewCard(payload.card)
+          setFlow("scam-detected")
+          return
+        }
+
+        if (payload.mode === "final") {
+          triggerSafe()
+          setTransferPrompt("")
+          setReviewCard(null)
+          setLatestAgentText(payload.assistant_text)
+          setTransferPurpose("")
+          setAgentStep(null)
+          setActiveThreadId(null)
+          setPendingFinbert(null)
+          return
+        }
+
+        throw new Error("Unexpected response from voice agent.")
+      } catch (error) {
+        setFlow("idle")
+        setErrorMessage(error instanceof Error ? error.message : "Unable to connect to backend.")
+      } finally {
+        setAgentStep(null)
+      }
+    },
+    [activeThreadId, pendingFinbert, transferPrompt, triggerSafe],
+  )
+
+  useEffect(() => {
+    const prompt = (externalPrompt ?? "").trim()
+    if (!prompt || prompt === lastAutoPrompt.current) return
+    if (flow === "processing-safe" || flow === "processing-scam") return
+
+    lastAutoPrompt.current = prompt
+    setTransferPrompt(prompt)
+    setPendingFinbert(externalFinbertData ?? null)
+    void submitTransferToAgent(prompt, externalFinbertData ?? null)
+  }, [externalFinbertData, externalPrompt, flow, submitTransferToAgent])
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      {/* Left column: balance + actions */}
       <div className="flex flex-col gap-6 lg:col-span-2">
-        <BalanceCard balance={balance} showBalance={showBalance} onToggle={() => setShowBalance((s) => !s)} />
+        <BalanceCard balance={balance} showBalance={showBalance} onToggle={() => setShowBalance((s) => !s)} userName={userName} />
 
         {lastBlocked && (
           <Card className="flex items-start justify-between gap-4 border-primary/30 bg-primary/5 p-4">
@@ -261,9 +300,7 @@ export function WalletView({
                 <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
               </div>
               <div className="leading-relaxed">
-                <p className="text-sm font-semibold text-foreground">
-                  RM {lastBlocked.amount.toFixed(2)} protected
-                </p>
+                <p className="text-sm font-semibold text-foreground">RM {lastBlocked.amount.toFixed(2)} protected</p>
                 <p className="text-xs text-muted-foreground">
                   Transfer to {lastBlocked.recipient} was blocked by Scam-Breaker. Funds remain in your wallet.
                 </p>
@@ -283,12 +320,12 @@ export function WalletView({
           flow={flow}
           transferPrompt={transferPrompt}
           setTransferPrompt={setTransferPrompt}
-          onAnalyze={submitTransferToAgent}
+          onAnalyze={() => void submitTransferToAgent()}
           reviewCard={reviewCard}
           transferPurpose={transferPurpose}
           setTransferPurpose={setTransferPurpose}
-          onCancelReview={handleCancel}
-          onProceedReview={handleProceed}
+          onCancelReview={() => void handleCancel()}
+          onProceedReview={() => void handleProceed()}
           errorMessage={errorMessage}
           agentStep={agentStep}
           latestAgentText={latestAgentText}
@@ -297,17 +334,19 @@ export function WalletView({
         <RecentTransactions transactions={transactions} />
       </div>
 
-      {/* Right column: AI guardian status */}
       <div className="flex flex-col gap-6">
         <GuardianStatusCard />
-        <QuickActionsCard />
+        <QuickActionsCard onReload={onReload ? () => setShowReload(true) : undefined} onReset={onReset} />
       </div>
+
+      {showReload && onReload && (
+        <ReloadModal onClose={() => setShowReload(false)} onReload={onReload} />
+      )}
 
       {flow === "success-safe" && transactions.length > 0 && (
         <div
           role="status"
           className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-lg"
-          style={{ animation: "var(--animate-toast-slide)" }}
         >
           <span className="inline-flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4" style={{ color: "var(--status-approved)" }} aria-hidden="true" />
@@ -323,25 +362,23 @@ function BalanceCard({
   balance,
   showBalance,
   onToggle,
+  userName,
 }: {
   balance: number
   showBalance: boolean
   onToggle: () => void
+  userName?: string
 }) {
   return (
     <Card className="overflow-hidden border-0 bg-primary p-0 text-primary-foreground shadow-sm">
       <div className="relative p-6 md:p-8">
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary-foreground/10 blur-2xl"
-        />
         <div className="relative flex items-start justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-wider text-primary-foreground/70">Available Balance</p>
             <div className="mt-2 flex items-baseline gap-2">
               <span className="text-xs font-medium text-primary-foreground/80">RM</span>
               <span className="font-mono text-4xl font-semibold tracking-tight md:text-5xl">
-                {showBalance ? balance.toFixed(2) : "•••••"}
+                {showBalance ? balance.toFixed(2) : "....."}
               </span>
               <button
                 onClick={onToggle}
@@ -351,14 +388,14 @@ function BalanceCard({
                 {showBalance ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
-            <p className="mt-3 text-sm text-primary-foreground/80">Ahmad Bin Ali · ****6721</p>
+            <p className="mt-3 text-sm text-primary-foreground/80">{userName || "Ahmad Bin Ali"} - ****6721</p>
           </div>
           <div className="flex flex-col items-end gap-2 text-right">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-primary-foreground/15 px-2.5 py-1 text-xs font-medium">
               <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground" aria-hidden="true" />
               Guardian Active
             </span>
-            <span className="text-xs text-primary-foreground/70">eWallet · MYR</span>
+            <span className="text-xs text-primary-foreground/70">eWallet - MYR</span>
           </div>
         </div>
       </div>
@@ -399,10 +436,6 @@ function SimulationPanel({
 
   return (
     <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card p-5 md:p-6">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -right-14 -top-14 h-44 w-44 rounded-full bg-primary/10 blur-2xl"
-      />
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-foreground">Send Money</h2>
@@ -411,25 +444,19 @@ function SimulationPanel({
           </span>
         </div>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Tell us who you want to pay and how much — we'll check everything is safe before sending.
+          Tell us who you want to pay and how much - we'll check everything is safe before sending.
         </p>
       </div>
 
       <div className="relative mt-6 rounded-xl border border-primary/20 bg-background/80 p-4 md:p-5">
         <div className="flex flex-col items-center gap-3 text-center">
-          <Button
-            type="button"
-            disabled
-            variant="outline"
-            className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md"
-            aria-label="Voice input coming soon"
-          >
+          <Button type="button" disabled variant="outline" className="h-28 w-28 rounded-full border-2 border-primary/30 bg-primary/10 text-primary shadow-md">
             <Mic className="h-10 w-10" aria-hidden="true" />
           </Button>
           <div className="space-y-1">
             <p className="text-sm font-semibold text-foreground">Voice Input</p>
             <p className="text-xs text-muted-foreground">
-              Voice transfer coming soon — type your request below for now.
+              Use the speech card below to transcribe voice, then it auto-feeds this transfer box.
             </p>
           </div>
         </div>
@@ -467,28 +494,14 @@ function SimulationPanel({
             aria-label="Transfer request"
           />
           <Button type="submit" disabled={isBusy || !transferPrompt.trim()} className="h-10 px-5">
-            {isBusy ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
-            )}
+            {isBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ShieldAlert className="h-4 w-4" aria-hidden="true" />}
             {isBusy ? (agentStep ?? "Checking...") : "Send"}
           </Button>
         </form>
 
-        {/* Inline step indicator below input */}
         {isBusy && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mt-2.5 flex items-center gap-2 px-1"
-            style={{ animation: "var(--animate-fade-in)" }}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full bg-primary"
-              style={{ animation: "var(--animate-status-pulse)" }}
-              aria-hidden="true"
-            />
+          <div role="status" aria-live="polite" className="mt-2.5 flex items-center gap-2 px-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
             <p className="text-xs text-muted-foreground">{agentStep ?? "Checking your request..."}</p>
           </div>
         )}
@@ -503,10 +516,6 @@ function SimulationPanel({
   )
 }
 
-/* ------------------------------------------------------------------ */
-/*  Status config                                                      */
-/* ------------------------------------------------------------------ */
-
 type StatusConfig = {
   label: string
   color: string
@@ -519,48 +528,17 @@ function statusConfig(status: string): StatusConfig {
   switch (status) {
     case "approved":
     case "completed":
-      return {
-        label: "Approved",
-        color: "var(--status-approved)",
-        bg: "var(--status-approved-bg)",
-        icon: <ShieldCheck className="h-3 w-3" />,
-      }
+      return { label: "Approved", color: "var(--status-approved)", bg: "var(--status-approved-bg)", icon: <ShieldCheck className="h-3 w-3" /> }
     case "pending_hitl":
-      return {
-        label: "Pending review",
-        color: "var(--status-pending)",
-        bg: "var(--status-pending-bg)",
-        icon: <Clock className="h-3 w-3" />,
-        pulse: true,
-      }
+      return { label: "Pending review", color: "var(--status-pending)", bg: "var(--status-pending-bg)", icon: <Clock className="h-3 w-3" />, pulse: true }
     case "warned":
-      return {
-        label: "Warned",
-        color: "var(--status-warned)",
-        bg: "var(--status-warned-bg)",
-        icon: <TriangleAlert className="h-3 w-3" />,
-      }
+      return { label: "Warned", color: "var(--status-warned)", bg: "var(--status-warned-bg)", icon: <TriangleAlert className="h-3 w-3" /> }
     case "blocked":
-      return {
-        label: "Blocked",
-        color: "var(--status-blocked)",
-        bg: "var(--status-blocked-bg)",
-        icon: <ShieldBan className="h-3 w-3" />,
-      }
+      return { label: "Blocked", color: "var(--status-blocked)", bg: "var(--status-blocked-bg)", icon: <ShieldBan className="h-3 w-3" /> }
     case "reversed":
-      return {
-        label: "Reversed",
-        color: "var(--status-reversed)",
-        bg: "var(--status-reversed-bg)",
-        icon: <RotateCcw className="h-3 w-3" />,
-      }
+      return { label: "Reversed", color: "var(--status-reversed)", bg: "var(--status-reversed-bg)", icon: <RotateCcw className="h-3 w-3" /> }
     default:
-      return {
-        label: status,
-        color: "var(--muted-foreground)",
-        bg: "var(--muted)",
-        icon: <Radio className="h-3 w-3" />,
-      }
+      return { label: status, color: "var(--muted-foreground)", bg: "var(--muted)", icon: <Radio className="h-3 w-3" /> }
   }
 }
 
@@ -570,210 +548,70 @@ function riskDotColor(score: number): string | null {
   return null
 }
 
-/* ------------------------------------------------------------------ */
-/*  RecentTransactions                                                 */
-/* ------------------------------------------------------------------ */
-
 function RecentTransactions({ transactions }: { transactions: Transaction[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  const toggle = (id: string) =>
-    setExpandedId((prev) => (prev === id ? null : id))
-
   return (
     <Card className="overflow-hidden p-0">
-      {/* Header */}
       <div className="flex items-center justify-between px-5 pt-5 md:px-6 md:pt-6">
         <h2 className="text-base font-semibold text-foreground">Recent Transactions</h2>
-        <span
-          className="rounded-full px-2.5 py-0.5 text-xs font-medium"
-          style={{ color: "var(--muted-foreground)", background: "var(--muted)" }}
-        >
+        <span className="rounded-full px-2.5 py-0.5 text-xs font-medium" style={{ color: "var(--muted-foreground)", background: "var(--muted)" }}>
           {transactions.length}
         </span>
       </div>
 
-      {/* List */}
       <div className="mt-3 flex flex-col gap-1.5 px-3 pb-4 md:px-4 md:pb-5">
         {transactions.length === 0 && (
           <div className="flex flex-col items-center gap-2 py-10 text-center">
-            <div
-              className="flex h-12 w-12 items-center justify-center rounded-full"
-              style={{ background: "var(--muted)" }}
-            >
+            <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: "var(--muted)" }}>
               <ArrowUpRight className="h-5 w-5 text-muted-foreground" />
             </div>
             <p className="text-sm text-muted-foreground">No transactions yet</p>
-            <p className="text-xs text-muted-foreground">Send your first transfer to get started</p>
           </div>
         )}
 
-        {transactions.map((tx, idx) => {
+        {transactions.map((tx) => {
           const sent = tx.type === "sent"
           const sc = statusConfig(tx.status)
           const riskDot = riskDotColor(tx.risk_score)
           const isExpanded = expandedId === tx.id
-          const isNew = idx === 0 && tx.date === "Just now"
 
           return (
-            <div
-              key={tx.id}
-              className="group rounded-xl border border-border bg-card transition-shadow hover:shadow-sm"
-              style={isNew ? { animation: "var(--animate-slide-in-up)" } : undefined}
-            >
-              {/* Main row — tappable */}
+            <div key={tx.id} className="group rounded-xl border border-border bg-card transition-shadow hover:shadow-sm">
               <button
                 type="button"
-                onClick={() => toggle(tx.id)}
+                onClick={() => setExpandedId((prev) => (prev === tx.id ? null : tx.id))}
                 className="flex w-full items-center gap-3 px-3.5 py-3 text-left active:bg-accent/50 md:px-4"
                 aria-expanded={isExpanded}
-                aria-controls={`tx-detail-${tx.id}`}
               >
-                {/* Direction icon */}
                 <div
-                  className={cn(
-                    "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full",
-                    sent ? "bg-secondary text-foreground" : "text-primary",
-                  )}
+                  className={cn("relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full", sent ? "bg-secondary text-foreground" : "text-primary")}
                   style={!sent ? { background: "var(--status-approved-bg)" } : undefined}
-                  aria-hidden="true"
                 >
                   {sent ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownLeft className="h-4 w-4" />}
-                  {/* Risk dot */}
                   {riskDot && (
-                    <span
-                      className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-card"
-                      style={{ background: riskDot }}
-                      aria-label={`Risk score ${tx.risk_score}`}
-                    />
+                    <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-card" style={{ background: riskDot }} />
                   )}
                 </div>
 
-                {/* Info */}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="truncate text-sm font-medium text-foreground">{tx.recipient}</p>
-                    {/* Status badge */}
-                    <span
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-                        sc.pulse && "animate-[status-pulse_2s_ease-in-out_infinite]",
-                      )}
-                      style={{ color: sc.color, background: sc.bg }}
-                    >
+                    <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide", sc.pulse && "animate-[status-pulse_2s_ease-in-out_infinite]")} style={{ color: sc.color, background: sc.bg }}>
                       {sc.icon}
                       {sc.label}
                     </span>
                   </div>
-                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {tx.purpose} · {tx.date}
-                  </p>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">{tx.purpose} - {tx.date}</p>
                 </div>
 
-                {/* Amount + chevron */}
                 <div className="flex items-center gap-2">
-                  <p
-                    className={cn(
-                      "whitespace-nowrap font-mono text-sm font-semibold",
-                      sent ? "text-foreground" : "",
-                    )}
-                    style={!sent ? { color: "var(--status-approved)" } : undefined}
-                  >
-                    {sent ? "−" : "+"} RM {tx.amount.toFixed(2)}
+                  <p className={cn("whitespace-nowrap font-mono text-sm font-semibold", sent ? "text-foreground" : "")} style={!sent ? { color: "var(--status-approved)" } : undefined}>
+                    {sent ? "-" : "+"} RM {tx.amount.toFixed(2)}
                   </p>
-                  <ChevronDown
-                    className={cn(
-                      "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200",
-                      isExpanded && "rotate-180",
-                    )}
-                    aria-hidden="true"
-                  />
+                  <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200", isExpanded && "rotate-180")} />
                 </div>
               </button>
-
-              {/* Expandable detail */}
-              {isExpanded && (
-                <div
-                  id={`tx-detail-${tx.id}`}
-                  className="border-t border-border bg-secondary/40 px-4 py-3"
-                  style={{ animation: "var(--animate-fade-in)" }}
-                >
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
-                    {/* Risk score */}
-                    <div>
-                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Risk Score</p>
-                      <div className="mt-1 flex items-center gap-2">
-                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
-                          <div
-                            className="h-full rounded-full transition-all"
-                            style={{
-                              width: `${Math.min(tx.risk_score, 100)}%`,
-                              background: tx.risk_score >= 70
-                                ? "var(--status-blocked)"
-                                : tx.risk_score >= 30
-                                  ? "var(--status-warned)"
-                                  : "var(--status-approved)",
-                            }}
-                          />
-                        </div>
-                        <span
-                          className="font-mono font-semibold"
-                          style={{
-                            color: tx.risk_score >= 70
-                              ? "var(--status-blocked)"
-                              : tx.risk_score >= 30
-                                ? "var(--status-warned)"
-                                : "var(--status-approved)",
-                          }}
-                        >
-                          {tx.risk_score}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Channel */}
-                    <div>
-                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Channel</p>
-                      <p className="mt-1 text-foreground">{tx.channel.replace(/_/g, " ")}</p>
-                    </div>
-
-                    {/* Decision */}
-                    <div>
-                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Decision</p>
-                      <p className="mt-1 text-foreground">{tx.decision}</p>
-                    </div>
-
-                    {/* Currency */}
-                    <div>
-                      <p className="font-medium uppercase tracking-wide text-muted-foreground">Currency</p>
-                      <p className="mt-1 text-foreground">{tx.currency}</p>
-                    </div>
-                  </div>
-
-                  {/* Reason codes */}
-                  {tx.reason_codes.length > 0 && (
-                    <div className="mt-3">
-                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Risk Signals</p>
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {tx.reason_codes.map((code) => (
-                          <span
-                            key={code}
-                            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[10px] font-medium"
-                            style={{ color: "var(--status-blocked)" }}
-                          >
-                            <span
-                              className="h-1 w-1 rounded-full"
-                              style={{ background: "var(--status-blocked)" }}
-                              aria-hidden="true"
-                            />
-                            {code.replace(/_/g, " ").toLowerCase()}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )
         })}
@@ -783,54 +621,126 @@ function RecentTransactions({ transactions }: { transactions: Transaction[] }) {
 }
 
 function GuardianStatusCard() {
-  const items = [
-    { label: "BERT Intent Model", status: "Online", tone: "ok" as const },
-    { label: "Neptune Graph (1-hop)", status: "100 ms p95", tone: "ok" as const },
-    { label: "Async Mule Sweep", status: "Last run 04:12", tone: "ok" as const },
-  ]
   return (
     <Card className="p-5 md:p-6">
       <div className="flex items-center gap-2">
         <Sparkles className="h-4 w-4 text-primary" aria-hidden="true" />
         <h2 className="text-base font-semibold text-foreground">AI Guardian Status</h2>
       </div>
-      <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-        Real-time models monitoring every outbound transfer.
-      </p>
       <ul className="mt-4 flex flex-col gap-3">
-        {items.map((it) => (
-          <li
-            key={it.label}
-            className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2.5"
-          >
-            <span className="text-sm text-foreground">{it.label}</span>
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">
-              <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-              {it.status}
-            </span>
-          </li>
-        ))}
+        <li className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2.5">
+          <span className="text-sm text-foreground">BERT Intent Model</span>
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+            Online
+          </span>
+        </li>
+        <li className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2.5">
+          <span className="text-sm text-foreground">Neptune Graph (1-hop)</span>
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+            100 ms p95
+          </span>
+        </li>
       </ul>
     </Card>
   )
 }
 
-function QuickActionsCard() {
-  const actions = ["Reload", "Send", "Pay Bills", "Scan QR"]
+function QuickActionsCard({ onReload, onReset }: { onReload?: () => void; onReset: () => void }) {
+  const actions: { label: string; onClick?: () => void; style?: string }[] = [
+    { label: "Reload", onClick: onReload, style: "border-primary/40 bg-primary/5 text-primary hover:bg-primary/10" },
+    { label: "Reset", onClick: onReset },
+    { label: "Send" },
+    { label: "Pay Bills" },
+  ]
   return (
     <Card className="p-5 md:p-6">
       <h2 className="text-base font-semibold text-foreground">Quick Actions</h2>
       <div className="mt-4 grid grid-cols-2 gap-2.5">
         {actions.map((a) => (
           <button
-            key={a}
+            key={a.label}
             type="button"
-            className="rounded-md border border-border bg-secondary px-3 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            onClick={a.onClick}
+            disabled={a.label === "Reload" && !a.onClick}
+            className={cn(
+              "rounded-md border border-border bg-secondary px-3 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent",
+              a.style,
+            )}
           >
-            {a}
+            {a.label}
           </button>
         ))}
       </div>
     </Card>
+  )
+}
+
+function ReloadModal({
+  onClose,
+  onReload,
+}: {
+  onClose: () => void
+  onReload: (amount: number) => Promise<void>
+}) {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<number | null>(null)
+
+  const handleSelect = async (amount: number) => {
+    setLoading(true)
+    setError(null)
+    try {
+      await onReload(amount)
+      setSuccess(amount)
+      setTimeout(onClose, 1400)
+    } catch (e) {
+      setError((e as Error).message ?? "Reload failed")
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <PlusCircle className="h-5 w-5 text-primary" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-foreground">Reload Wallet</h2>
+          </div>
+          <button onClick={onClose} disabled={loading} className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground" aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="mt-5 grid grid-cols-3 gap-2.5">
+          {RELOAD_OPTIONS.map((amt) => (
+            <button
+              key={amt}
+              type="button"
+              onClick={() => void handleSelect(amt)}
+              disabled={loading || success !== null}
+              className="rounded-lg border border-border bg-secondary px-3 py-3 text-sm font-semibold text-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:opacity-50"
+            >
+              RM {amt}
+            </button>
+          ))}
+        </div>
+
+        {loading && !success && (
+          <div className="mt-4 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            Processing reload...
+          </div>
+        )}
+        {success !== null && (
+          <div className="mt-4 flex items-center justify-center gap-2 text-sm font-medium text-primary">
+            <CheckCircle2 className="h-4 w-4" />
+            RM {success}.00 added to your wallet
+          </div>
+        )}
+        {error && <p className="mt-4 text-center text-sm text-destructive">{error}</p>}
+      </div>
+    </div>
   )
 }

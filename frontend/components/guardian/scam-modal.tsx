@@ -26,10 +26,6 @@ type ScamInterventionCardProps = {
   onProceed: () => void
 }
 
-/* ------------------------------------------------------------------ */
-/*  Risk-level config — drives colors, tone, and layout               */
-/* ------------------------------------------------------------------ */
-
 type RiskLevel = "safe" | "caution" | "danger"
 
 function getRiskLevel(score: number): RiskLevel {
@@ -51,7 +47,6 @@ const RISK_CONFIG: Record<
     meterColor: string
     safetyLabel: string
     showPurpose: boolean
-    primaryAction: "approve" | "cancel"
   }
 > = {
   safe: {
@@ -65,7 +60,6 @@ const RISK_CONFIG: Record<
     meterColor: "var(--status-approved)",
     safetyLabel: "This transfer looks safe",
     showPurpose: false,
-    primaryAction: "approve",
   },
   caution: {
     headerBg: "var(--status-warned-bg)",
@@ -78,7 +72,6 @@ const RISK_CONFIG: Record<
     meterColor: "var(--status-warned)",
     safetyLabel: "Please review before sending",
     showPurpose: true,
-    primaryAction: "approve",
   },
   danger: {
     headerBg: "var(--status-blocked-bg)",
@@ -89,15 +82,10 @@ const RISK_CONFIG: Record<
     borderColor: "var(--status-blocked)",
     icon: <ShieldAlert className="h-5 w-5" />,
     meterColor: "var(--status-blocked)",
-    safetyLabel: "We're concerned about this transfer",
+    safetyLabel: "We are concerned about this transfer",
     showPurpose: true,
-    primaryAction: "cancel",
   },
 }
-
-/* ------------------------------------------------------------------ */
-/*  Reason code → human-friendly label                                */
-/* ------------------------------------------------------------------ */
 
 function humanizeReason(code: string): string {
   const map: Record<string, string> = {
@@ -117,10 +105,6 @@ function humanizeReason(code: string): string {
   return map[code] ?? code.replace(/_/g, " ").toLowerCase()
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main component                                                     */
-/* ------------------------------------------------------------------ */
-
 export function ScamInterventionCard({
   card,
   assistantText,
@@ -136,30 +120,19 @@ export function ScamInterventionCard({
   const recipientName = card.recipient_name ?? card.subtitle
 
   return (
-    <div
-      className="mt-5 overflow-hidden rounded-xl border bg-card"
-      style={{ borderColor: cfg.borderColor + "40" }}
-    >
-      {/* ── Header ── */}
-      <div
-        className="flex items-center gap-3 px-4 py-3"
-        style={{ background: cfg.headerBg, color: cfg.headerText }}
-      >
+    <div className="mt-5 overflow-hidden rounded-xl border bg-card" style={{ borderColor: `${cfg.borderColor}40` }}>
+      <div className="flex items-center gap-3 px-4 py-3" style={{ background: cfg.headerBg, color: cfg.headerText }}>
         {cfg.icon}
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold">{cfg.safetyLabel}</p>
           <p className="mt-0.5 text-xs opacity-80">{card.title}</p>
         </div>
-        <span
-          className="shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-          style={{ color: cfg.badgeColor, background: cfg.badgeBg, border: `1px solid ${cfg.badgeColor}30` }}
-        >
+        <span className="shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider" style={{ color: cfg.badgeColor, background: cfg.badgeBg, border: `1px solid ${cfg.badgeColor}30` }}>
           {cfg.badgeLabel}
         </span>
       </div>
 
       <div className="px-4 py-4 sm:px-5">
-        {/* ── Transfer summary ── */}
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-xs text-muted-foreground">Sending to</p>
@@ -167,23 +140,16 @@ export function ScamInterventionCard({
           </div>
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Amount</p>
-            <p className="font-mono text-xl font-bold text-foreground">
-              RM {amount.toFixed(2)}
-            </p>
+            <p className="font-mono text-xl font-bold text-foreground">RM {amount.toFixed(2)}</p>
           </div>
         </div>
 
-        {/* ── Guardian message ── */}
         {assistantText && (
-          <div
-            className="mt-4 rounded-lg border border-border bg-secondary/50 px-3 py-2.5"
-            style={{ animation: "var(--animate-fade-in)" }}
-          >
+          <div className="mt-4 rounded-lg border border-border bg-secondary/50 px-3 py-2.5">
             <p className="text-sm leading-relaxed text-foreground">{assistantText}</p>
           </div>
         )}
 
-        {/* ── Safety meter ── */}
         <div className="mt-4">
           <div className="flex items-center justify-between text-xs">
             <span className="font-medium text-muted-foreground">Safety check</span>
@@ -195,7 +161,6 @@ export function ScamInterventionCard({
             <div
               className="h-full rounded-full transition-all duration-500"
               style={{
-                /* Invert: low risk = full green bar, high risk = small red bar */
                 width: `${Math.max(100 - (card.risk_score ?? 0), 8)}%`,
                 background: cfg.meterColor,
               }}
@@ -203,20 +168,13 @@ export function ScamInterventionCard({
           </div>
         </div>
 
-        {/* ── Concerns list (only if there are risk signals) ── */}
         {reasons.length > 0 && risk !== "safe" && (
           <div className="mt-4">
-            <p className="text-xs font-medium text-muted-foreground">
-              {risk === "danger" ? "Why we're concerned" : "Things to note"}
-            </p>
+            <p className="text-xs font-medium text-muted-foreground">{risk === "danger" ? "Why we are concerned" : "Things to note"}</p>
             <ul className="mt-2 flex flex-col gap-1.5">
               {reasons.slice(0, 3).map((code) => (
                 <li key={code} className="flex items-start gap-2 text-xs">
-                  <span
-                    className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ background: cfg.meterColor }}
-                    aria-hidden="true"
-                  />
+                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: cfg.meterColor }} />
                   <span className="leading-relaxed text-foreground">{humanizeReason(code)}</span>
                 </li>
               ))}
@@ -224,12 +182,9 @@ export function ScamInterventionCard({
           </div>
         )}
 
-        {/* ── Purpose (only for caution/danger) ── */}
         {cfg.showPurpose && (
           <label className="mt-4 block">
-            <span className="text-sm font-medium text-foreground">
-              {card.purpose_question ?? "What is this transfer for?"}
-            </span>
+            <span className="text-sm font-medium text-foreground">{card.purpose_question ?? "What is this transfer for?"}</span>
             <Textarea
               value={purpose}
               onChange={(event) => onPurposeChange(event.target.value)}
@@ -239,39 +194,15 @@ export function ScamInterventionCard({
           </label>
         )}
 
-        {/* ── Action buttons ── */}
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
-          {cfg.primaryAction === "approve" ? (
-            <>
-              <Button variant="ghost" size="sm" onClick={onCancel} className="text-muted-foreground hover:text-foreground">
-                <XCircle className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                onClick={onProceed}
-                className="text-white"
-                style={{ background: cfg.badgeColor }}
-              >
-                <ShieldCheck className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                Approve Transfer
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="ghost" size="sm" onClick={onProceed} className="text-muted-foreground hover:text-foreground">
-                Send Anyway
-              </Button>
-              <Button
-                size="sm"
-                onClick={onCancel}
-                style={{ background: "var(--status-blocked)", color: "white" }}
-              >
-                <ShieldCheck className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                Cancel Transfer
-              </Button>
-            </>
-          )}
+          <Button variant="ghost" size="sm" onClick={onCancel} className="text-muted-foreground hover:text-foreground">
+            <XCircle className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Reject
+          </Button>
+          <Button size="sm" onClick={onProceed} className="text-white" style={{ background: cfg.badgeColor }}>
+            <ShieldCheck className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Accept & Send
+          </Button>
         </div>
       </div>
     </div>

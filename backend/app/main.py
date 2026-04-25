@@ -66,7 +66,16 @@ def create_app() -> FastAPI:
         # Keep API bootable even if model runtime is unavailable.
         app.state.main_agent = None
         app.state.main_agent_error = "main_agent_init_failed"
+
     app.include_router(api_router)
+
+    # Mount feature-branch API routes (speech transcription, regulatory dashboard)
+    try:
+        from app.api.router import api_router as feature_router
+        app.include_router(feature_router)
+    except ImportError:
+        pass
+
     return app
 
 

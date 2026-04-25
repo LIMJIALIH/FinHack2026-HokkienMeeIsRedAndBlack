@@ -1,5 +1,10 @@
 # Backend (Guardian Voice Fraud API)
 
+FastAPI backend that combines:
+- Main transaction agent + HITL + Neptune persistence
+- Onboarding/auth/eKYC + DynamoDB user data
+- Speech transcription + fraud/FinBERT-style scoring + regulatory APIs
+
 ## Structure
 
 ```text
@@ -7,73 +12,85 @@ backend/
   app/
     api/
       dependencies.py
+      router.py                # speech/regulatory router (/api/v1/...)
       v1/
         endpoints/
-          health.py
-          risk.py
-          transfer.py
+          health.py            # /healthz
+          risk.py              # /risk/check, /risk/graph
+          transfer.py          # /transfer/evaluate, /transfer/llm-decision, /transfer/warning/confirm
+          voice.py             # /voice/turn, /voice/turn/stream, /voice/decision
         router.py
     core/
       config.py
     schemas/
       transfer.py
+      speech.py
+      voice.py
     services/
       risk_engine.py
       warnings.py
-    main.py
+      transcribe_service.py
+      fraud_score_service.py
+      transfer_agent_service.py
+    main.py                    # structured app factory
+  main.py                      # unified entry point (auth + onboarding + agent)
   tests/
     test_health.py
-  main.py  # compatibility entrypoint
+```
+
+## Environment
+
+Create `.env` in `backend/`.
+
+```bash
+# Core app
+NEPTUNE_ENDPOINT=<required>
+AWS_REGION=ap-southeast-1
+AWS_PROFILE=
+
+# Agent
+MAIN_AGENT_MODEL=
+MAIN_AGENT_MODEL_PROVIDER=openai
+OPENAI_API_KEY=
+GOOGLE_API_KEY=
+GEMINI_API_KEY=
+
+# Speech + fraud scoring
+GEMINI_MODEL=gemini-3.1-flash-lite-preview
+GEMINI_TIMEOUT_SECONDS=180
+FRAUD_SCORE_ENDPOINT_URL=http://47.254.237.181:8000/score
+FRAUD_SCORE_TIMEOUT_SECONDS=15
+PATTERN_ANALYZE_ENDPOINT_URL=http://47.250.192.196:8000/analyze
+PATTERN_ANALYZE_TIMEOUT_SECONDS=15
+
+# CORS
+API_CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
 ```
 
 ## Run
 
 ```bash
 uv sync
-uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uv run python main.py
 ```
 
-Primary module entrypoint:
+Alternative:
 
 ```bash
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Endpoints
+## Tests
 
-- `GET /healthz`
-- `POST /risk/check`
-- `POST /risk/graph`
-- `POST /transfer/evaluate`
-- `POST /transfer/warning/confirm`
-
-## Example request
-
-```json
-{
-  "user_id": "u_123",
-  "recipient_id": "u_999",
-  "amount": 3500,
-  "message": "Please transfer urgently now",
-  "recipient_is_new": true,
-  "device_id": "device_hash",
-  "ip_hash": "ip_hash",
-  "transaction_context_hash": "txctx_hash"
-}
+```bash
+uv run pytest
 ```
 
-If `decision=WARNING`, call `/transfer/warning/confirm` with `confirmed=true`.
-The API enforces a 30-second cooling-off delay before it returns `APPROVED_AFTER_WARNING`.
+## Notes
 
-## Internal graph agent
-
-`backend/agent/graph_agent.py` provides an internal Deep Agent for graph risk analysis:
-
-- `build_graph_deep_agent()`
-- `run_graph_turn()`
-- `run_graph_transaction_analysis()`
-
-The graph tools are in `backend/agent/graph_tools.py` and call the same `RiskEngine` path used by the API.
-
-- `NEPTUNE_ENDPOINT` is required.
-- Mock graph mode has been removed.
+- `NEPTUNE_ENDPOINT` is required (mock graph mode removed).
+- Speech transcription endpoint: `POST /api/v1/speech/transcribe`
+- FinBERT/pattern endpoint: `POST /api/v1/speech/check-finbert`
+- Health endpoints:
+  - `GET /health` (root app)
+  - `GET /healthz` (v1 core route)

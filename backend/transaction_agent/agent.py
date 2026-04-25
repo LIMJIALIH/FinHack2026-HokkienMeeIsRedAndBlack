@@ -141,8 +141,18 @@ def _resolve_user_id(user_id: str | None) -> str:
     return value or _default_user_id()
 
 
-def _build_turn_payload(text: str, user_id: str) -> dict[str, Any]:
-    content = f"sender_user_id={user_id}\nuser_request={text}"
+def _build_turn_payload(
+    text: str,
+    user_id: str,
+    finbert_score: float | None = None,
+    finbert_assessment: str | None = None,
+) -> dict[str, Any]:
+    lines = [f"sender_user_id={user_id}", f"user_request={text}"]
+    if finbert_score is not None:
+        lines.append(f"finbert_score={finbert_score}")
+    if finbert_assessment:
+        lines.append(f"finbert_assessment={finbert_assessment}")
+    content = "\n".join(lines)
     return {"messages": [{"role": "user", "content": content}]}
 
 
@@ -280,9 +290,12 @@ Never invent information.
 
 INPUT CONTRACT
 Each turn includes:
-- sender_user_id (internal — NEVER show this to the user)
+- sender_user_id (internal - NEVER show this to the user)
 - user_request
+- optional finbert_score (0-100 risk signal from NLP model)
+- optional finbert_assessment (short model assessment)
 Always treat sender_user_id as the sender identity for internal tool calls.
+Use FinBERT signals as additional risk evidence when present.
 
 AVAILABLE TOOLS (internal - NEVER mention tool names to the user)
 - search_contact_nodes_tool: find contacts by name
@@ -385,6 +398,8 @@ def run_main_turn(
     text: str,
     thread_id: str | None = None,
     user_id: str | None = None,
+    finbert_score: float | None = None,
+    finbert_assessment: str | None = None,
 ) -> dict[str, Any]:
     """Run a single user turn through the agent.
 
@@ -413,7 +428,12 @@ def run_main_turn(
 
     try:
         agent.agent.invoke(
-            _build_turn_payload(text=text, user_id=resolved_user_id),
+            _build_turn_payload(
+                text=text,
+                user_id=resolved_user_id,
+                finbert_score=finbert_score,
+                finbert_assessment=finbert_assessment,
+            ),
             config=config,
         )
     except GraphRecursionError:
@@ -578,6 +598,8 @@ def run_main_turn_stream_events(
     text: str,
     thread_id: str | None = None,
     user_id: str | None = None,
+    finbert_score: float | None = None,
+    finbert_assessment: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield SSE-compatible events for a single user turn."""
     resolved_thread_id = thread_id or str(uuid.uuid4())
@@ -587,6 +609,8 @@ def run_main_turn_stream_events(
         text=text,
         thread_id=resolved_thread_id,
         user_id=user_id,
+        finbert_score=finbert_score,
+        finbert_assessment=finbert_assessment,
     )
     for step in result.get("result", {}).get("steps", []):
         if step != "Analyzing your intent":

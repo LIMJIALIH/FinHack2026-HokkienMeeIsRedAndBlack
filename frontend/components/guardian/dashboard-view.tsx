@@ -10,20 +10,18 @@ type DashboardViewProps = {
 }
 
 export function DashboardView({ protectedAmount, threatsBlocked }: DashboardViewProps) {
+
   return (
     <div className="flex flex-col gap-6">
-      {/* Header strip */}
       <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
         <div>
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Regulatory Operations
-          </p>
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Regulatory Operations</p>
           <h1 className="mt-1 text-balance text-2xl font-semibold tracking-tight text-foreground md:text-3xl">
             Fraud Intervention Dashboard
           </h1>
           <p className="mt-1.5 max-w-2xl text-pretty text-sm leading-relaxed text-muted-foreground">
-            Live view of Scam-Breaker activity across the TNG eWallet network — for Bank Negara
-            Malaysia compliance officers.
+            Live view of Scam-Breaker activity across the TNG eWallet network for Bank Negara Malaysia
+            compliance officers.
           </p>
         </div>
         <div className="inline-flex items-center gap-2 self-start rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground md:self-auto">
@@ -32,11 +30,7 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
         </div>
       </header>
 
-      {/* Metrics */}
-      <section
-        aria-label="Key metrics"
-        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
-      >
+      <section aria-label="Key metrics" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           icon={<ShieldCheck className="h-4 w-4" aria-hidden="true" />}
           label="Protected Today"
@@ -67,14 +61,13 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
         />
       </section>
 
-      {/* Graph + STR panels */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <Card className="p-5 md:p-6 lg:col-span-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold text-foreground">Blocked Fraud Ring</h2>
               <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                Node-link view of the relationship Neptune flagged when Marcus attempted to send RM 1,000.
+                Live node-edge relationship graph from Neptune `db-neptune-2`.
               </p>
             </div>
             <div className="flex items-center gap-3 text-xs">
@@ -93,17 +86,17 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
             <FileText className="h-4 w-4 text-primary" aria-hidden="true" />
             <h2 className="text-base font-semibold text-foreground">Suspicious Transaction Report</h2>
           </div>
-          <p className="mt-1 text-xs text-muted-foreground">Auto-generated · STR-2026-0488</p>
+          <p className="mt-1 text-xs text-muted-foreground">Auto-generated - STR-2026-0488</p>
 
           <dl className="mt-4 grid grid-cols-3 gap-x-3 gap-y-2.5 text-sm">
             <STRRow label="Reporting FI" value="Touch 'n Go Digital Sdn Bhd" />
             <STRRow label="Customer" value="Marcus Tan · ****6721" />
             <STRRow label="Amount" value="RM 1,000.00" mono />
-            <STRRow label="Counterparty" value="Investment Agent · ****9024" />
+            <STRRow label="Counterparty" value="Investment Agent - ****9024" />
             <STRRow label="Channel" value="P2P Wallet Transfer" />
             <STRRow label="Decision" value="Blocked at authorisation" highlight />
-            <STRRow label="BERT Signal" value="Urgency 0.95 · Phishing 0.88" mono />
-            <STRRow label="Graph Signal" value="Mule cluster #442 · 1-hop match" />
+            <STRRow label="BERT Signal" value="Urgency 0.95 - Phishing 0.88" mono />
+            <STRRow label="Graph Signal" value="Mule cluster #442 - 1-hop match" />
             <STRRow label="Timestamp" value="2026-04-25 10:14:08 MYT" />
           </dl>
 
@@ -116,7 +109,6 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
         </Card>
       </section>
 
-      {/* Architecture note */}
       <ArchitectureNote />
     </div>
   )
@@ -183,9 +175,7 @@ function STRRow({
 }) {
   return (
     <>
-      <dt className="col-span-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
+      <dt className="col-span-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd
         className={`col-span-2 text-sm leading-snug ${mono ? "font-mono" : ""} ${
           highlight ? "font-semibold text-destructive" : "text-foreground"
@@ -220,7 +210,7 @@ function ArchitectureNote() {
         <ArchPanel
           tag="Synchronous"
           tagTone="primary"
-          title="1-hop checks · ≤ 100 ms"
+          title="1-hop checks - <= 100 ms"
           body="At authorisation we run a single-hop Neptune query: is the recipient directly linked to a known mule, a flagged IP, or a fresh shell account? If yes, the transfer is blocked before funds leave the wallet."
           metrics={[
             { k: "Path", v: "Realtime" },
@@ -261,9 +251,7 @@ function ArchPanel({
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
       <span
         className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-          tagTone === "primary"
-            ? "bg-primary/10 text-primary"
-            : "bg-secondary text-muted-foreground"
+          tagTone === "primary" ? "bg-primary/10 text-primary" : "bg-secondary text-muted-foreground"
         }`}
       >
         {tag}
@@ -273,9 +261,7 @@ function ArchPanel({
       <ul className="mt-1 grid grid-cols-3 gap-2 border-t border-border pt-3">
         {metrics.map((m) => (
           <li key={m.k}>
-            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-              {m.k}
-            </p>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{m.k}</p>
             <p className="mt-0.5 font-mono text-sm font-semibold text-foreground">{m.v}</p>
           </li>
         ))}
