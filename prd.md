@@ -1,12 +1,14 @@
-# PRD (Integrated from `prd1.md` and `prd2.md`)
+# PRD Alignment Report
 
-## Alignment Check
-- `prd1.md` length: `0` bytes
-- `prd2.md` length: `0` bytes
-- Result: Aligned (both files are empty)
+## Source Check
+- `prd1.md`: contains full PRD content (product vision, requirements, architecture, flows, metrics)
+- `prd2.md`: empty file (`0` bytes)
 
-## Integrated Content
-No product requirements content was found in either source file, so there is nothing substantive to merge yet.
+## Alignment Result
+`prd1.md` and `prd2.md` are **not aligned** because one file has detailed requirements and the other has no content.
 
-## Next Input Needed
-Populate `prd1.md` and/or `prd2.md` with PRD content, then rerun integration.
+## Integration Status
+Integration into a unified `prd.md` is not possible yet, since there is no second PRD content to compare and merge.
+
+## What Is Needed Next
+Add content to `prd2.md` (or confirm `prd1.md` should be the single source of truth), then rerun alignment + merge.
