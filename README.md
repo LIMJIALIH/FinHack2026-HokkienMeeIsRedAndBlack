@@ -135,7 +135,10 @@ Base URL: `http://127.0.0.1:8000`
   - Runs combined check: fraud score + pattern analysis + Gemini final assessment.
   - Upstream integrations:
     - Pattern analysis endpoint: `http://47.250.192.196:8000/analyze`
+      https://github.com/YiCave/Pattern-Matching-Model
     - Fraud score endpoint: `http://47.254.237.181:8000/score`
+      https://github.com/KaiHuang05/TNGD-FINHACK-2026
+    - Both of the upstream integrations are being deployed with **Elastic Compute Services (ECS) Alibaba Cloud**.
 - `GET /api/v1/regulatory-dashboard/graph`
   - Returns nodes/edges from Neptune for regulatory dashboard visualization.
 
