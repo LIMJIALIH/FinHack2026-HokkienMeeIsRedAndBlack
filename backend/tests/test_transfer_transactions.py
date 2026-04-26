@@ -97,11 +97,12 @@ def test_llm_confirmed_transfer_persists_before_wallet_settlement() -> None:
     events: list[str] = []
     risk_engine = FakeRiskEngine(events=events)
     wallet = FakeWalletLedger(events=events)
+    background_tasks = BackgroundTasks()
 
     response = transfer_llm_decision(
         request=_request(),
         payload=_llm_payload(hitl_already_confirmed=True),
-        background_tasks=BackgroundTasks(),
+        background_tasks=background_tasks,
         risk_engine=risk_engine,
         warning_store=InMemoryWarningStore(),
         wallet_ledger=wallet,
@@ -116,6 +117,7 @@ def test_llm_confirmed_transfer_persists_before_wallet_settlement() -> None:
         "update:tx_test:approved",
     ]
     assert wallet.calls == ["settle:user:alice:user:bob:10.0:tx_test"]
+    assert len(background_tasks.tasks) == 1
 
 
 def test_llm_confirmed_transfer_does_not_settle_when_persist_fails() -> None:

@@ -19,7 +19,7 @@ class FakeNeptuneClient:
     def execute_open_cypher_query(self, openCypherQuery, parameters=None):
         params = json.loads(parameters or "{}")
 
-        if "summary_updates_applied AS summary_updates_applied" in openCypherQuery:
+        if "AS summary_updates_applied" in openCypherQuery:
             return {
                 "results": [
                     {

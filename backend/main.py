@@ -328,15 +328,19 @@ def neptune_get_wallet_user(user_id: str) -> Optional[dict]:
             u.name AS name,
             coalesce(u.balance, 0) AS balance,
             u.updated_at AS updated_at
-        ORDER BY
-            CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END,
-            CASE WHEN u.user_id = $uid THEN 0 ELSE 1 END
-        LIMIT 1
         """,
         {"uid": user_id, "graph_uid": user_id if user_id.startswith("user:") else f"user:{user_id}"},
     )
     rows = result.get("results", [])
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    rows.sort(
+        key=lambda row: (
+            1 if row.get("balance") is None else 0,
+            0 if row.get("user_id") == user_id else 1,
+        )
+    )
+    return rows[0]
 
 
 def neptune_get_wallet_balance(user_id: str, fallback: float = 0.0) -> float:

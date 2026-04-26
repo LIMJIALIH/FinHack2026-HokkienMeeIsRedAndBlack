@@ -1,8 +1,9 @@
 "use client"
 
-import { Activity, FileText, Gauge, ShieldCheck, Zap } from "lucide-react"
+import { useState } from "react"
+import { Activity, ArrowDownLeft, ArrowUpRight, Gauge, Network, ShieldAlert, ShieldCheck, UserRound, Zap } from "lucide-react"
 import { Card } from "@/components/ui/card"
-import { FraudGraph } from "@/components/guardian/fraud-graph"
+import { FraudGraph, type GraphNode, type NodeKind } from "@/components/guardian/fraud-graph"
 
 type DashboardViewProps = {
   protectedAmount: number
@@ -10,6 +11,7 @@ type DashboardViewProps = {
 }
 
 export function DashboardView({ protectedAmount, threatsBlocked }: DashboardViewProps) {
+  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
 
   return (
     <div className="flex flex-col gap-6">
@@ -26,7 +28,7 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
         </div>
         <div className="inline-flex items-center gap-2 self-start rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground md:self-auto">
           <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-          Live · refreshed seconds ago
+          Live - refreshed seconds ago
         </div>
       </header>
 
@@ -77,36 +79,11 @@ export function DashboardView({ protectedAmount, threatsBlocked }: DashboardView
             </div>
           </div>
           <div className="mt-5 overflow-hidden rounded-lg border border-border bg-secondary/40 p-3">
-            <FraudGraph />
+            <FraudGraph selectedNodeId={selectedNode?.id} onNodeSelect={setSelectedNode} />
           </div>
         </Card>
 
-        <Card className="p-5 md:p-6 lg:col-span-2">
-          <div className="flex items-center gap-2">
-            <FileText className="h-4 w-4 text-primary" aria-hidden="true" />
-            <h2 className="text-base font-semibold text-foreground">Suspicious Transaction Report</h2>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">Auto-generated - STR-2026-0488</p>
-
-          <dl className="mt-4 grid grid-cols-3 gap-x-3 gap-y-2.5 text-sm">
-            <STRRow label="Reporting FI" value="Touch 'n Go Digital Sdn Bhd" />
-            <STRRow label="Customer" value="Marcus Tan · ****6721" />
-            <STRRow label="Amount" value="RM 1,000.00" mono />
-            <STRRow label="Counterparty" value="Investment Agent - ****9024" />
-            <STRRow label="Channel" value="P2P Wallet Transfer" />
-            <STRRow label="Decision" value="Blocked at authorisation" highlight />
-            <STRRow label="BERT Signal" value="Urgency 0.95 - Phishing 0.88" mono />
-            <STRRow label="Graph Signal" value="Mule cluster #442 - 1-hop match" />
-            <STRRow label="Timestamp" value="2026-04-25 10:14:08 MYT" />
-          </dl>
-
-          <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 px-3 py-2.5">
-            <p className="text-xs leading-relaxed text-foreground">
-              Filed automatically to BNM eFRS. Customer notified via Guardian Voice with explainable
-              reasoning. No further action required from compliance team.
-            </p>
-          </div>
-        </Card>
+        <NodeInfoPanel node={selectedNode} />
       </section>
 
       <ArchitectureNote />
@@ -162,7 +139,105 @@ function LegendDot({ color, label }: { color: "primary" | "muted" | "destructive
   )
 }
 
-function STRRow({
+function NodeInfoPanel({ node }: { node: GraphNode | null }) {
+  const tone = node ? nodeTone(node.kind) : nodeTone("neutral")
+
+  return (
+    <Card className="p-5 md:p-6 lg:col-span-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <UserRound className="h-4 w-4 text-primary" aria-hidden="true" />
+          <h2 className="text-base font-semibold text-foreground">Node Intelligence</h2>
+        </div>
+        {node && (
+          <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${tone.badge}`}>
+            {node.kind}
+          </span>
+        )}
+      </div>
+
+      {!node ? (
+        <div className="mt-5 flex min-h-[310px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-secondary/40 px-5 text-center">
+          <div className="flex h-11 w-11 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm">
+            <Network className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <p className="mt-3 text-sm font-medium text-foreground">No node selected</p>
+          <p className="mt-1 max-w-xs text-xs leading-relaxed text-muted-foreground">
+            Relationship, risk, and transfer details will populate here from the live Neptune graph.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-5">
+          <div className={`rounded-lg border px-4 py-3 ${tone.panel}`}>
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Selected node</p>
+            <h3 className="mt-1 truncate text-xl font-semibold tracking-tight text-foreground">{node.label}</h3>
+            <p className="mt-1 font-mono text-xs text-muted-foreground">{node.userId}</p>
+          </div>
+
+          <dl className="mt-4 grid grid-cols-3 gap-x-3 gap-y-2.5 text-sm">
+            <NodeInfoRow label="Graph ID" value={node.graphId} mono />
+            <NodeInfoRow label="Risk Tier" value={node.riskTier} highlight={node.kind === "flagged"} />
+            <NodeInfoRow label="Status" value={node.status} highlight={node.status === "blocked"} />
+            <NodeInfoRow label="Connections" value={node.connections.toString()} mono />
+            <NodeInfoRow label="Inbound" value={node.inbound.toString()} mono />
+            <NodeInfoRow label="Outbound" value={node.outbound.toString()} mono />
+            <NodeInfoRow label="Flagged Links" value={node.flaggedConnections.toString()} mono highlight={node.flaggedConnections > 0} />
+            <NodeInfoRow
+              label="Total Value"
+              value={`RM ${node.totalAmount.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              mono
+            />
+          </dl>
+
+          <div className="mt-5">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className={`h-4 w-4 ${node.flaggedConnections > 0 ? "text-destructive" : "text-muted-foreground"}`} aria-hidden="true" />
+              <h3 className="text-sm font-semibold text-foreground">Counterparties</h3>
+            </div>
+            <div className="mt-2 flex flex-col gap-2">
+              {node.counterparties.length === 0 ? (
+                <div className="rounded-md border border-border bg-secondary/40 px-3 py-3 text-xs text-muted-foreground">
+                  No direct transfer edges in the current 1-hop view.
+                </div>
+              ) : (
+                node.counterparties.map((counterparty, index) => {
+                  const flagged = counterparty.status === "warned" || counterparty.status === "blocked" || counterparty.status === "reversed"
+                  return (
+                    <div key={`${counterparty.id}-${counterparty.direction}-${index}`} className="rounded-md border border-border bg-card px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span
+                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                              counterparty.direction === "outbound" ? "bg-secondary text-foreground" : "bg-primary/10 text-primary"
+                            }`}
+                          >
+                            {counterparty.direction === "outbound" ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownLeft className="h-3.5 w-3.5" />}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-foreground">{counterparty.label}</p>
+                            <p className="font-mono text-[11px] text-muted-foreground">{counterparty.id}</p>
+                          </div>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${flagged ? "bg-destructive/10 text-destructive" : "bg-secondary text-muted-foreground"}`}>
+                          {counterparty.status}
+                        </span>
+                      </div>
+                      <p className="mt-2 font-mono text-xs font-semibold text-foreground">
+                        RM {counterparty.amount.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </p>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function NodeInfoRow({
   label,
   value,
   mono,
@@ -177,7 +252,7 @@ function STRRow({
     <>
       <dt className="col-span-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd
-        className={`col-span-2 text-sm leading-snug ${mono ? "font-mono" : ""} ${
+        className={`col-span-2 break-words text-sm leading-snug ${mono ? "font-mono" : ""} ${
           highlight ? "font-semibold text-destructive" : "text-foreground"
         }`}
       >
@@ -185,6 +260,25 @@ function STRRow({
       </dd>
     </>
   )
+}
+
+function nodeTone(kind: NodeKind) {
+  if (kind === "trusted") {
+    return {
+      badge: "bg-primary/10 text-primary",
+      panel: "border-primary/30 bg-primary/5",
+    }
+  }
+  if (kind === "flagged") {
+    return {
+      badge: "bg-destructive/10 text-destructive",
+      panel: "border-destructive/30 bg-destructive/5",
+    }
+  }
+  return {
+    badge: "bg-secondary text-muted-foreground",
+    panel: "border-border bg-secondary/40",
+  }
 }
 
 function ArchitectureNote() {
