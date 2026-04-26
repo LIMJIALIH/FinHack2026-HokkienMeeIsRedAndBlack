@@ -8,6 +8,7 @@ from app.core.config import Settings
 from app.schemas.transfer import TransferEvaluateRequest
 from app.services.aws_session import build_boto3_session
 from app.services.risk_engine import NeptuneRiskClient, RiskEngine
+from app.services.transfer_summary import update_transfer_participant_summaries
 
 
 USER_NODE_FIELDS = [
@@ -43,7 +44,6 @@ TRANSFER_EDGE_FIELDS = [
     "risk_reason_codes",
     "updated_at",
 ]
-
 
 def _emit_progress(status: str, detail: str) -> None:
     try:
@@ -245,6 +245,12 @@ def get_transfer_edges_info_tool(
         "source": "none",
         "error": "neptune_not_configured",
     }
+
+
+def update_transfer_participant_summaries_tool(transaction_id: str) -> dict[str, Any]:
+    """Update sender and recipient User summaries from a settled transfer edge."""
+    _emit_progress("updating_summaries", "Updating transfer summaries")
+    return update_transfer_participant_summaries(transaction_id)
 
 
 def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) -> dict[str, Any]:

@@ -2,6 +2,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from fastapi import BackgroundTasks
 from fastapi import HTTPException
 
 from app.api.v1.endpoints.transfer import transfer_llm_decision, warning_confirm
@@ -100,6 +101,7 @@ def test_llm_confirmed_transfer_persists_before_wallet_settlement() -> None:
     response = transfer_llm_decision(
         request=_request(),
         payload=_llm_payload(hitl_already_confirmed=True),
+        background_tasks=BackgroundTasks(),
         risk_engine=risk_engine,
         warning_store=InMemoryWarningStore(),
         wallet_ledger=wallet,
@@ -124,6 +126,7 @@ def test_llm_confirmed_transfer_does_not_settle_when_persist_fails() -> None:
         transfer_llm_decision(
             request=_request(),
             payload=_llm_payload(hitl_already_confirmed=True),
+            background_tasks=BackgroundTasks(),
             risk_engine=risk_engine,
             warning_store=InMemoryWarningStore(),
             wallet_ledger=wallet,
@@ -144,6 +147,7 @@ def test_llm_confirmed_transfer_insufficient_balance_returns_409() -> None:
         transfer_llm_decision(
             request=_request(),
             payload=_llm_payload(hitl_already_confirmed=True),
+            background_tasks=BackgroundTasks(),
             risk_engine=risk_engine,
             warning_store=InMemoryWarningStore(),
             wallet_ledger=wallet,
@@ -167,6 +171,7 @@ def test_warning_confirm_settlement_failure_does_not_mark_approved() -> None:
     with pytest.raises(HTTPException) as exc_info:
         warning_confirm(
             payload=WarningConfirmRequest(warning_id="warn_test", confirmed=True),
+            background_tasks=BackgroundTasks(),
             risk_engine=FakeRiskEngine(),
             warning_store=store,
             wallet_ledger=wallet,
@@ -183,6 +188,7 @@ def test_warning_confirm_graph_update_failure_marks_failed_after_settlement() ->
     with pytest.raises(HTTPException) as exc_info:
         warning_confirm(
             payload=WarningConfirmRequest(warning_id="warn_test", confirmed=True),
+            background_tasks=BackgroundTasks(),
             risk_engine=FakeRiskEngine(update_result=False),
             warning_store=store,
             wallet_ledger=FakeWalletLedger(),

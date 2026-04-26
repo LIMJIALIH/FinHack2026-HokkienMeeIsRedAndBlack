@@ -12,6 +12,7 @@ from transaction_agent.graph_tools import (
     inspect_graph_node_tool,
     search_contact_nodes_tool,
     search_transaction_graph_tool,
+    update_transfer_participant_summaries_tool,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "inspect_graph_node_tool",
     "search_contact_nodes_tool",
     "search_transaction_graph_tool",
+    "update_transfer_participant_summaries_tool",
 ]

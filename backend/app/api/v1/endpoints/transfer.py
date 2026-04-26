@@ -2,7 +2,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from app.api.dependencies import get_flow_graph, get_risk_engine, get_wallet_ledger, get_warning_store
 from app.core.auth import get_current_user_id
@@ -23,6 +23,7 @@ from app.services.wallet_ledger import (
     WalletSettlementError,
     WalletSettlementResult,
 )
+from app.services.transfer_summary import update_transfer_participant_summaries
 
 router = APIRouter()
 
@@ -149,10 +150,20 @@ def _settle_persisted_transfer_or_4xx(
     return settlement
 
 
+def _schedule_summary_update(
+    background_tasks: BackgroundTasks | None,
+    transaction_id: str,
+) -> None:
+    if background_tasks is None:
+        return
+    background_tasks.add_task(update_transfer_participant_summaries, transaction_id)
+
+
 @router.post("/transfer/llm-decision", response_model=TransferEvaluateResponse)
 def transfer_llm_decision(
     request: Request,
     payload: LlmTransferDecisionRequest,
+    background_tasks: BackgroundTasks,
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
     wallet_ledger: WalletLedger = Depends(get_wallet_ledger),
@@ -186,6 +197,7 @@ def transfer_llm_decision(
             recipient_user_id=transaction_payload.recipient_id,
             amount=transaction_payload.amount,
         )
+        _schedule_summary_update(background_tasks, transaction_id)
         return TransferEvaluateResponse(
             transaction_id=transaction_id,
             decision=risk.decision,
@@ -234,6 +246,7 @@ def transfer_llm_decision(
 def transfer_evaluate(
     request: Request,
     payload: TransferEvaluateRequest,
+    background_tasks: BackgroundTasks,
     graph: Any = Depends(get_flow_graph),
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
@@ -266,6 +279,7 @@ def transfer_evaluate(
             recipient_user_id=payload.recipient_id,
             amount=payload.amount,
         )
+        _schedule_summary_update(background_tasks, transaction_id)
 
     warning_state: WarningState | None = None
     warning_delay_seconds: int | None = None
@@ -297,6 +311,7 @@ def transfer_evaluate(
 @router.post("/transfer/warning/confirm", response_model=WarningConfirmResponse)
 def warning_confirm(
     payload: WarningConfirmRequest,
+    background_tasks: BackgroundTasks,
     risk_engine: RiskEngine = Depends(get_risk_engine),
     warning_store: InMemoryWarningStore = Depends(get_warning_store),
     wallet_ledger: WalletLedger = Depends(get_wallet_ledger),
@@ -362,6 +377,7 @@ def warning_confirm(
         raise HTTPException(status_code=503, detail="transfer_graph_update_missing_after_settlement")
 
     warning_store.mark_approved(payload.warning_id, purpose=payload.purpose)
+    _schedule_summary_update(background_tasks, warning.transaction_id)
     return WarningConfirmResponse(
         status="APPROVED_AFTER_WARNING",
         sender_balance=settlement.sender_balance,
