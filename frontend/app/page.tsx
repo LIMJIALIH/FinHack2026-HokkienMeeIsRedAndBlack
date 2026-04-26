@@ -16,16 +16,22 @@ export type TransactionStatus =
   | "blocked"
   | "reversed"
   | "completed"
+  | "settlement_failed"
+  | "unknown"
 
 export type Transaction = {
   id: string
   recipient: string
+  recipient_graph_id?: string
   amount: number
   currency: string
   purpose: string
   date: string
   type: "sent" | "received"
   status: TransactionStatus
+  wallet_settled?: boolean
+  sender_balance_after?: number | null
+  recipient_balance_after?: number | null
   channel: string
   risk_score: number
   reason_codes: string[]
@@ -85,21 +91,42 @@ export default function Page() {
           }
         })
         .catch(() => {})
+
+      fetch(`${API_URL}/wallet/transactions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((json) => {
+          if (Array.isArray(json?.transactions)) {
+            setTransactions(json.transactions as Transaction[])
+          }
+        })
+        .catch(() => {})
     }
   }, [])
 
   const refreshWalletFromBackend = async (): Promise<void> => {
     const token = localStorage.getItem("auth_token")
     if (!token) return
-    const response = await fetch(`${API_URL}/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (!response.ok) return
-    const data = (await response.json()) as { balance?: number }
-    if (data.balance === undefined) return
-    const bal = Number(data.balance)
-    setBalance(bal)
-    setUserBaseBalance(bal)
+    const headers = { Authorization: `Bearer ${token}` }
+    const [accountResponse, transactionsResponse] = await Promise.all([
+      fetch(`${API_URL}/auth/me`, { headers }),
+      fetch(`${API_URL}/wallet/transactions`, { headers }),
+    ])
+    if (accountResponse.ok) {
+      const data = (await accountResponse.json()) as { balance?: number }
+      if (data.balance !== undefined) {
+        const bal = Number(data.balance)
+        setBalance(bal)
+        setUserBaseBalance(bal)
+      }
+    }
+    if (transactionsResponse.ok) {
+      const data = (await transactionsResponse.json()) as { transactions?: Transaction[] }
+      if (Array.isArray(data.transactions)) {
+        setTransactions(data.transactions)
+      }
+    }
   }
 
   function handleToggleRole() {
@@ -206,6 +233,7 @@ export default function Page() {
     const newBal = Number(data.new_balance)
     setBalance(newBal)
     setUserBaseBalance(newBal)
+    void refreshWalletFromBackend()
   }
 
   return (

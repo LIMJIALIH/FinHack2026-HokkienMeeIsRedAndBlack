@@ -31,6 +31,7 @@ class RiskCheckResult(BaseModel):
 
 
 class TransferEvaluateResponse(BaseModel):
+    transaction_id: str | None = None
     decision: Decision
     risk_score: int
     reason_codes: list[str]
@@ -53,11 +54,14 @@ class LlmTransferDecisionRequest(TransferEvaluateRequest):
 class WarningConfirmRequest(BaseModel):
     warning_id: str = Field(min_length=1)
     confirmed: bool
+    purpose: str | None = Field(default=None, max_length=1000)
 
 
 class WarningConfirmResponse(BaseModel):
     status: Literal["CANCELLED", "PENDING_DELAY", "APPROVED_AFTER_WARNING"]
     wait_seconds_remaining: int | None = None
+    sender_balance: float | None = None
+    recipient_balance: float | None = None
 
 
 GraphNodeKind = Literal["user", "neutral", "flagged", "mule"]

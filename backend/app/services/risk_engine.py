@@ -52,6 +52,24 @@ def _to_graph_user_id(user_id: str) -> str:
     return user_id if user_id.startswith("user:") else f"user:{user_id}"
 
 
+def _candidate_user_ids(raw_user_id: str) -> list[str]:
+    candidates: list[str] = []
+    if raw_user_id:
+        candidates.append(raw_user_id)
+        if raw_user_id.startswith("user:"):
+            stripped = raw_user_id[5:]
+            if stripped:
+                candidates.append(stripped)
+        else:
+            candidates.append(f"user:{raw_user_id}")
+
+    deduped: list[str] = []
+    for value in candidates:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
 def _extract_graph_metric(evidence: list[str], key: str) -> int:
     prefix = f"graph:{key}="
     for item in evidence:
@@ -89,9 +107,28 @@ class NeptuneRiskClient:
             config=Config(connect_timeout=1, read_timeout=1, retries={"max_attempts": 1, "mode": "standard"}),
         )
 
+    def resolve_graph_user_id(self, raw_user_id: str) -> str:
+        candidates = _candidate_user_ids(raw_user_id)
+        response = self._client.execute_open_cypher_query(
+            openCypherQuery=(
+                "MATCH (u:User) "
+                "WHERE u.`~id` IN $candidates OR u.user_id IN $candidates "
+                "RETURN u.`~id` AS graph_id "
+                "ORDER BY "
+                "CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END, "
+                "CASE WHEN u.user_id = $raw_user_id THEN 0 ELSE 1 END "
+                "LIMIT 1"
+            ),
+            parameters=json.dumps({"candidates": candidates, "raw_user_id": raw_user_id}),
+        )
+        rows = response.get("results", [])
+        if rows and rows[0].get("graph_id"):
+            return str(rows[0]["graph_id"])
+        return _to_graph_user_id(raw_user_id)
+
     def fetch_graph_risk(self, user_id: str, recipient_id: str) -> tuple[int, list[str], list[str], int]:
-        sender_graph_id = _to_graph_user_id(user_id)
-        recipient_graph_id = _to_graph_user_id(recipient_id)
+        sender_graph_id = self.resolve_graph_user_id(user_id)
+        recipient_graph_id = self.resolve_graph_user_id(recipient_id)
         query = (
             "MATCH (u:User {`~id`: $sender_id})-[t:TRANSFERRED_TO]->(r:User {`~id`: $recipient_id}) "
             "RETURN "
@@ -167,8 +204,8 @@ class NeptuneRiskClient:
             "t.updated_at = $updated_at_epoch"
         )
         params = {
-            "sender_id": _to_graph_user_id(sender_user_id),
-            "recipient_id": _to_graph_user_id(recipient_user_id),
+            "sender_id": self.resolve_graph_user_id(sender_user_id),
+            "recipient_id": self.resolve_graph_user_id(recipient_user_id),
             "tx_id": transaction_id,
             "tx_time": tx_time,
             "amount": amount,

@@ -287,6 +287,11 @@ export function WalletView({
         setFlow("scam-detected")
         return
       }
+      if (payload.backend_status === "INSUFFICIENT_BALANCE") {
+        setErrorMessage(payload.assistant_text || "Your wallet balance is too low for this transfer.")
+        setFlow("scam-detected")
+        return
+      }
       if (payload.backend_status !== "APPROVED" || !payload.transfer) {
         throw new Error("Transfer was not approved by backend.")
       }
@@ -835,6 +840,8 @@ function statusConfig(status: string): StatusConfig {
       return { label: "Blocked", color: "var(--status-blocked)", bg: "var(--status-blocked-bg)", icon: <ShieldBan className="h-3 w-3" /> }
     case "reversed":
       return { label: "Reversed", color: "var(--status-reversed)", bg: "var(--status-reversed-bg)", icon: <RotateCcw className="h-3 w-3" /> }
+    case "settlement_failed":
+      return { label: "Not sent", color: "var(--status-blocked)", bg: "var(--status-blocked-bg)", icon: <ShieldBan className="h-3 w-3" /> }
     default:
       return { label: status, color: "var(--muted-foreground)", bg: "var(--muted)", icon: <Radio className="h-3 w-3" /> }
   }
@@ -848,6 +855,10 @@ function riskDotColor(score: number): string | null {
 
 function RecentTransactions({ transactions }: { transactions: Transaction[] }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const formatBalance = (value: number | null | undefined) => (
+    value === null || value === undefined ? "N/A" : `RM ${value.toFixed(2)}`
+  )
 
   return (
     <Card className="overflow-hidden p-0">
@@ -910,6 +921,48 @@ function RecentTransactions({ transactions }: { transactions: Transaction[] }) {
                   <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200", isExpanded && "rotate-180")} />
                 </div>
               </button>
+              {isExpanded && (
+                <div className="border-t border-border px-3.5 py-3 text-xs text-muted-foreground md:px-4">
+                  <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
+                    <div>
+                      <dt className="font-medium text-foreground">Transaction ID</dt>
+                      <dd className="mt-0.5 break-all font-mono">{tx.id}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Settlement</dt>
+                      <dd className="mt-0.5">{tx.wallet_settled ? "Money moved in Neptune" : "No wallet debit recorded"}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Balance after</dt>
+                      <dd className="mt-0.5">{formatBalance(tx.sender_balance_after)}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Channel</dt>
+                      <dd className="mt-0.5">{tx.channel.replace(/_/g, " ")}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Risk decision</dt>
+                      <dd className="mt-0.5">{tx.decision.replace(/_/g, " ")}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Risk score</dt>
+                      <dd className="mt-0.5">{tx.risk_score}</dd>
+                    </div>
+                  </dl>
+                  {tx.reason_codes.length > 0 && (
+                    <div className="mt-3">
+                      <p className="font-medium text-foreground">Risk reasons</p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {tx.reason_codes.map((reason) => (
+                          <span key={reason} className="rounded-full bg-secondary px-2 py-0.5 font-mono text-[11px] text-secondary-foreground">
+                            {reason}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )
         })}

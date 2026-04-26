@@ -317,6 +317,105 @@ def neptune_update_balance(user_id: str, new_balance: float, updated_at: str) ->
     )
 
 
+def neptune_get_wallet_user(user_id: str) -> Optional[dict]:
+    result = neptune_run(
+        """
+        MATCH (u:User)
+        WHERE u.user_id = $uid OR u.`~id` = $uid OR u.`~id` = $graph_uid
+        RETURN
+            u.`~id` AS graph_id,
+            u.user_id AS user_id,
+            u.name AS name,
+            coalesce(u.balance, 0) AS balance,
+            u.updated_at AS updated_at
+        ORDER BY
+            CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END,
+            CASE WHEN u.user_id = $uid THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        {"uid": user_id, "graph_uid": user_id if user_id.startswith("user:") else f"user:{user_id}"},
+    )
+    rows = result.get("results", [])
+    return rows[0] if rows else None
+
+
+def neptune_get_wallet_balance(user_id: str, fallback: float = 0.0) -> float:
+    wallet_user = neptune_get_wallet_user(user_id)
+    if not wallet_user:
+        return fallback
+    return float(wallet_user.get("balance", fallback) or 0)
+
+
+def neptune_recent_wallet_transactions(user_id: str, limit: int = 20) -> list[dict]:
+    wallet_user = neptune_get_wallet_user(user_id)
+    if not wallet_user:
+        return []
+    result = neptune_run(
+        """
+        MATCH (s:User)-[t:TRANSFERRED_TO]->(r:User)
+        WHERE s.`~id` = $sender_graph_id
+          AND (coalesce(t.wallet_settled, false) = true OR coalesce(t.status, '') <> 'approved')
+        RETURN
+            t.`~id` AS id,
+            coalesce(r.name, r.user_id, r.`~id`) AS recipient,
+            r.`~id` AS recipient_graph_id,
+            coalesce(t.amount, 0) AS amount,
+            coalesce(t.currency, 'MYR') AS currency,
+            coalesce(t.message_text, t.tx_note, 'Transfer') AS purpose,
+            coalesce(t.tx_time, toString(t.updated_at), '') AS date,
+            coalesce(t.status, 'unknown') AS status,
+            coalesce(t.wallet_settled, false) AS wallet_settled,
+            t.sender_balance_after AS sender_balance_after,
+            t.recipient_balance_after AS recipient_balance_after,
+            coalesce(t.channel, 'voice_agent') AS channel,
+            coalesce(t.risk_score_latest, 0) AS risk_score,
+            coalesce(t.risk_reason_codes, '[]') AS reason_codes,
+            coalesce(t.risk_decision_latest, 'APPROVED') AS decision
+        ORDER BY coalesce(t.updated_at, 0) DESC
+        LIMIT $limit
+        """,
+        {
+            "sender_graph_id": wallet_user["graph_id"],
+            "limit": max(1, min(int(limit), 50)),
+        },
+    )
+    txs: list[dict] = []
+    for row in result.get("results", []):
+        reason_codes = row.get("reason_codes", [])
+        if isinstance(reason_codes, str):
+            try:
+                reason_codes = json.loads(reason_codes)
+            except json.JSONDecodeError:
+                reason_codes = [reason_codes] if reason_codes else []
+        txs.append({
+            "id": str(row.get("id", "")),
+            "recipient": str(row.get("recipient", "Unknown recipient")),
+            "recipient_graph_id": str(row.get("recipient_graph_id", "")),
+            "amount": float(row.get("amount", 0) or 0),
+            "currency": str(row.get("currency", "MYR") or "MYR"),
+            "purpose": str(row.get("purpose", "Transfer") or "Transfer"),
+            "date": str(row.get("date", "") or ""),
+            "type": "sent",
+            "status": str(row.get("status", "unknown") or "unknown"),
+            "wallet_settled": bool(row.get("wallet_settled", False)),
+            "sender_balance_after": (
+                float(row["sender_balance_after"])
+                if row.get("sender_balance_after") is not None
+                else None
+            ),
+            "recipient_balance_after": (
+                float(row["recipient_balance_after"])
+                if row.get("recipient_balance_after") is not None
+                else None
+            ),
+            "channel": str(row.get("channel", "voice_agent") or "voice_agent"),
+            "risk_score": int(float(row.get("risk_score", 0) or 0)),
+            "reason_codes": reason_codes if isinstance(reason_codes, list) else [],
+            "decision": str(row.get("decision", "APPROVED") or "APPROVED"),
+        })
+    return txs
+
+
 def neptune_get_user(user_id: str) -> Optional[dict]:
     result = neptune_run(
         "MATCH (u:User {user_id: $uid}) RETURN u", {"uid": user_id}
@@ -604,6 +703,7 @@ def login(req: LoginRequest):
     user = get_user_by_gmail(req.gmail.lower())
     if not user or not pwd_context.verify(req.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
+    dynamo_balance = float(user.get("balance", 0))
     return {
         "token": create_jwt(user["user_id"]),
         "user": {
@@ -612,7 +712,7 @@ def login(req: LoginRequest):
             "gmail":             user["gmail"],
             "preferred_language": user.get("preferred_language", "en"),
             "kyc_status":        user["kyc_status"],
-            "balance":           float(user.get("balance", 0)),
+            "balance":           neptune_get_wallet_balance(user["user_id"], fallback=dynamo_balance),
         },
     }
 
@@ -622,13 +722,14 @@ def get_me(user_id: str = Depends(get_current_user_id)):
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    dynamo_balance = float(user.get("balance", 0))
     return {
         "id":                 user["user_id"],
         "full_name":          user["full_name"],
         "gmail":              user["gmail"],
         "preferred_language": user.get("preferred_language", "en"),
         "kyc_status":         user["kyc_status"],
-        "balance":            float(user.get("balance", 0)),
+        "balance":            neptune_get_wallet_balance(user_id, fallback=dynamo_balance),
     }
 
 
@@ -636,25 +737,27 @@ def get_me(user_id: str = Depends(get_current_user_id)):
 def wallet_reload(req: ReloadRequest, user_id: str = Depends(get_current_user_id)):
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
-    user = get_user_by_id(user_id)
-    if not user:
+    wallet_user = neptune_get_wallet_user(user_id)
+    if not wallet_user:
         raise HTTPException(status_code=404, detail="User not found")
-    current = float(user.get("balance", 0))
+    current = float(wallet_user.get("balance", 0) or 0)
     new_balance = round(current + req.amount, 2)
     updated_at = datetime.now(timezone.utc).isoformat()
-    try:
-        dynamo().update_item(
-            Key={"user_id": user_id},
-            UpdateExpression="SET balance = :b, updated_at = :u",
-            ExpressionAttributeValues={":b": Decimal(str(new_balance)), ":u": updated_at},
-        )
-    except ClientError as e:
-        _handle_dynamo_error(e, "update_item")
     try:
         neptune_update_balance(user_id, new_balance, updated_at)
     except Exception as e:
         _log.error("Neptune balance update failed: %s", e)
+        raise HTTPException(status_code=503, detail="Wallet balance update failed")
     return {"new_balance": new_balance}
+
+
+@app.get("/wallet/transactions")
+def wallet_transactions(user_id: str = Depends(get_current_user_id), limit: int = 20):
+    try:
+        return {"transactions": neptune_recent_wallet_transactions(user_id, limit=limit)}
+    except Exception as exc:
+        _log.error("Neptune wallet transaction fetch failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Wallet transactions unavailable")
 
 
 @app.post("/kyc/complete")

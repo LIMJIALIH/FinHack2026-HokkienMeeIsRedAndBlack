@@ -26,6 +26,7 @@ from transaction_agent.graph_tools import (
     search_contact_nodes_tool,
 )
 from transaction_agent.tools import (
+    confirm_warning_tool,
     reset_request_auth_header,
     set_request_auth_header,
     submit_llm_transfer_decision_tool,
@@ -91,6 +92,22 @@ def execute_transfer(
         evidence_refs=evidence_refs or [],
         hitl_already_confirmed=True,
     )
+    warning_id = result.get("warning_id")
+    warning_delay_seconds = int(result.get("warning_delay_seconds") or 0)
+    if isinstance(warning_id, str) and warning_id and warning_delay_seconds <= 0:
+        confirmation = confirm_warning_tool(
+            warning_id=warning_id,
+            confirmed=True,
+            purpose=message or tx_note,
+        )
+        result["warning_confirm"] = confirmation
+        result["backend_status"] = (
+            "APPROVED" if confirmation.get("status") == "APPROVED_AFTER_WARNING" else confirmation.get("status")
+        )
+    elif isinstance(warning_id, str) and warning_id:
+        result["backend_status"] = "PENDING_DELAY"
+    else:
+        result["backend_status"] = "APPROVED"
     return json.dumps(result)
 
 
@@ -201,6 +218,41 @@ def _error_payload(thread_id: str, message: str) -> dict[str, Any]:
     }
 
 
+def _friendly_transfer_error(message: str) -> str | None:
+    if "insufficient_balance" in message:
+        return "This transfer cannot be sent because your wallet balance is too low."
+    if "user_not_found" in message:
+        return "This transfer cannot be sent because one of the wallet accounts was not found."
+    return None
+
+
+def _transfer_error_payload(
+    agent: MainAgentRuntime,
+    thread_id: str,
+    config: dict[str, Any],
+    message: str,
+    backend_status: str,
+) -> dict[str, Any]:
+    try:
+        state = agent.agent.get_state(config)
+        messages = state.values.get("messages", [])
+    except Exception:  # noqa: BLE001
+        messages = []
+    transfer_args = _extract_last_execute_transfer_args(messages)
+    return {
+        "thread_id": thread_id,
+        "result": {
+            "mode": "final",
+            "assistant_text": message,
+            "card": None,
+            "transfer": _build_transfer_summary(transfer_args) if transfer_args else None,
+            "backend_status": backend_status,
+            "steps": ["Analyzing your intent", *_collect_action_steps(messages)],
+        },
+        "hitl": None,
+    }
+
+
 def _summarize_tool_name(name: str) -> str:
     return {
         "search_contact_nodes_tool": "Looking up your contact",
@@ -241,7 +293,11 @@ def _extract_last_assistant_text(messages: list[Any]) -> str:
     return ""
 
 
-def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
+def _build_review_card(
+    tool_args: dict[str, Any],
+    warning_id: str | None = None,
+    warning_delay_seconds: int | None = None,
+) -> dict[str, Any]:
     """Build a transfer review card from the interrupted execute_transfer args."""
     risk_score = int(tool_args.get("risk_score", 0))
     reason_codes = list(tool_args.get("reason_codes") or [])
@@ -274,12 +330,12 @@ def _build_review_card(tool_args: dict[str, Any]) -> dict[str, Any]:
         "risk_score": risk_score,
         "reason_codes": reason_codes,
         "evidence_refs": list(tool_args.get("evidence_refs") or []),
-        "warning_id": None,
-        "warning_delay_seconds": None,
+        "warning_id": warning_id,
+        "warning_delay_seconds": warning_delay_seconds,
         "purpose_question": "What is this transfer for?",
         "actions": [
-            {"action": "approve", "warning_id": None, "label": "Approve"},
-            {"action": "reject", "warning_id": None, "label": "Reject"},
+            {"action": "approve", "warning_id": warning_id, "label": "Approve"},
+            {"action": "reject", "warning_id": warning_id, "label": "Reject"},
         ],
     }
 
@@ -318,6 +374,35 @@ def _build_transfer_summary(tool_args: dict[str, Any]) -> dict[str, Any]:
             else "APPROVED"
         ),
     }
+
+
+def _extract_last_execute_transfer_result(messages: list[Any]) -> dict[str, Any] | None:
+    for msg in reversed(messages):
+        if getattr(msg, "name", None) != "execute_transfer":
+            continue
+        content = getattr(msg, "content", "")
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return None
+    return None
+
+
+def _backend_status_from_transfer_result(result: dict[str, Any] | None) -> str:
+    if not result:
+        return "APPROVED"
+    explicit = result.get("backend_status")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    confirmation = result.get("warning_confirm")
+    if isinstance(confirmation, dict) and confirmation.get("status") == "APPROVED_AFTER_WARNING":
+        return "APPROVED"
+    if result.get("warning_id"):
+        return "PENDING_DELAY"
+    return "APPROVED"
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +448,16 @@ INTENT GATE (MANDATORY, FIRST STEP EVERY TURN)
 TOOL USAGE POLICY
 1) Recipient resolution:
    - Search contacts when any recipient name is mentioned.
-   - Pick the best matching contact automatically.
-   - If no match is found, use the provided name as-is and continue.
+   - Use a contact only when exactly one clear match is returned.
+   - If multiple contacts match, ask the user which recipient they mean.
+   - If no match is found, ask the user for the recipient identifier.
+   - Do NOT use an unresolved display name as recipient_id.
 2) Before calling execute_transfer:
    - Look up sender account info.
    - Look up recipient account info.
+   - Compare the sender balance with the requested amount.
+   - If the sender balance is lower than the amount, do NOT call execute_transfer.
+     Tell the user the wallet balance is too low.
    - Check transfer history between them.
 3) Call execute_transfer as soon as enough evidence is gathered.
    The system will show a review screen where the user can approve or reject.
@@ -557,18 +647,45 @@ def _build_response_from_state(
     transfer_args = _extract_last_execute_transfer_args(messages)
     if transfer_args is not None:
         transfer_summary = _build_transfer_summary(transfer_args)
+    transfer_result = _extract_last_execute_transfer_result(messages)
+    pending_backend_delay = (
+        transfer_result is not None
+        and _backend_status_from_transfer_result(transfer_result) == "PENDING_DELAY"
+    )
 
     return {
         "thread_id": thread_id,
         "result": {
-            "mode": "final",
-            "assistant_text": assistant_text,
-            "card": None,
+            "mode": "hitl_required" if pending_backend_delay else "final",
+            "assistant_text": (
+                "For your safety, please wait before confirming this transfer again."
+                if pending_backend_delay
+                else assistant_text
+            ),
+            "card": (
+                _build_review_card(
+                    transfer_args,
+                    warning_id=transfer_result.get("warning_id"),
+                    warning_delay_seconds=int(transfer_result.get("warning_delay_seconds") or 0),
+                )
+                if transfer_args is not None
+                and transfer_result is not None
+                and pending_backend_delay
+                else None
+            ),
             "transfer": transfer_summary,
-            "backend_status": backend_status,
+            "backend_status": (
+                _backend_status_from_transfer_result(transfer_result)
+                if has_transfer_result
+                else backend_status
+            ),
             "steps": steps,
         },
-        "hitl": None,
+        "hitl": (
+            {"state": "pending_warning_delay"}
+            if pending_backend_delay
+            else None
+        ),
     }
 
 
@@ -623,6 +740,19 @@ def resume_main_hitl(
     # Verify there's actually a pending interrupt.
     state = agent.agent.get_state(config)
     if not state.tasks:
+        if warning_id:
+            auth_token = set_request_auth_header(auth_header)
+            try:
+                return _resume_backend_warning_decision(
+                    agent=agent,
+                    thread_id=thread_id,
+                    config=config,
+                    warning_id=warning_id,
+                    decision=decision,
+                    purpose=purpose,
+                )
+            finally:
+                reset_request_auth_header(auth_token)
         return _error_payload(thread_id, "No pending transfer decision for this thread.")
 
     if decision == "approve":
@@ -642,6 +772,17 @@ def resume_main_hitl(
         except GraphRecursionError:
             return _error_payload(thread_id, "Transfer processing exceeded step limit.")
         except Exception as exc:  # noqa: BLE001
+            friendly_error = _friendly_transfer_error(str(exc))
+            if friendly_error:
+                return _transfer_error_payload(
+                    agent=agent,
+                    thread_id=thread_id,
+                    config=config,
+                    message=friendly_error,
+                    backend_status="INSUFFICIENT_BALANCE"
+                    if "insufficient_balance" in str(exc)
+                    else "TRANSFER_FAILED",
+                )
             return _error_payload(thread_id, f"Unable to process decision: {exc}")
     finally:
         reset_request_auth_header(auth_token)
@@ -652,6 +793,75 @@ def resume_main_hitl(
         if isinstance(result, dict):
             result["backend_status"] = "REJECTED_BY_USER"
     return response
+
+
+def _resume_backend_warning_decision(
+    agent: MainAgentRuntime,
+    thread_id: str,
+    config: dict[str, Any],
+    warning_id: str,
+    decision: str,
+    purpose: str | None = None,
+) -> dict[str, Any]:
+    state = agent.agent.get_state(config)
+    messages = state.values.get("messages", [])
+    transfer_args = _extract_last_execute_transfer_args(messages) or {}
+    steps = ["Analyzing your intent", *_collect_action_steps(messages)]
+    confirmed = decision == "approve"
+
+    result = confirm_warning_tool(
+        warning_id=warning_id,
+        confirmed=confirmed,
+        purpose=purpose,
+    )
+    status = result.get("status")
+    transfer_summary = _build_transfer_summary(transfer_args) if transfer_args else None
+
+    if status == "PENDING_DELAY":
+        wait_seconds = int(result.get("wait_seconds_remaining") or 0)
+        return {
+            "thread_id": thread_id,
+            "result": {
+                "mode": "hitl_required",
+                "assistant_text": f"Please wait {wait_seconds} more seconds before confirming this transfer.",
+                "card": _build_review_card(
+                    transfer_args,
+                    warning_id=warning_id,
+                    warning_delay_seconds=wait_seconds,
+                ),
+                "transfer": transfer_summary,
+                "backend_status": "PENDING_DELAY",
+                "steps": steps,
+            },
+            "hitl": {"state": "pending_warning_delay"},
+        }
+
+    if status == "CANCELLED":
+        return {
+            "thread_id": thread_id,
+            "result": {
+                "mode": "final",
+                "assistant_text": "Transfer cancelled.",
+                "card": None,
+                "transfer": transfer_summary,
+                "backend_status": "REJECTED_BY_USER",
+                "steps": steps,
+            },
+            "hitl": None,
+        }
+
+    return {
+        "thread_id": thread_id,
+        "result": {
+            "mode": "final",
+            "assistant_text": "Transfer approved.",
+            "card": None,
+            "transfer": transfer_summary,
+            "backend_status": "APPROVED",
+            "steps": steps,
+        },
+        "hitl": None,
+    }
 
 
 # ---------------------------------------------------------------------------

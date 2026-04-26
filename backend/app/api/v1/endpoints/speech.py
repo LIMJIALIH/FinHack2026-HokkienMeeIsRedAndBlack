@@ -12,9 +12,11 @@ from app.schemas.speech import (
 )
 from app.services.fraud_score_service import FraudScoreService
 from app.services.transfer_agent_service import TransferAgentService
-from app.services.transcribe_service import TranscribeService
+from app.services.transcribe_service import SUPPORTED_FORMATS, TranscribeService
 
 router = APIRouter()
+
+MAX_AUDIO_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 @router.post("/speech/transcribe", response_model=SpeechToTextResponse)
@@ -28,10 +30,15 @@ async def transcribe_speech(
     media_format = _infer_media_format(file)
     if not media_format:
         raise HTTPException(status_code=400, detail="Unable to infer media format from uploaded file")
+    if media_format not in SUPPORTED_FORMATS:
+        allowed = ", ".join(sorted(SUPPORTED_FORMATS))
+        raise HTTPException(status_code=400, detail=f"Unsupported media format: {media_format}. Supported: {allowed}")
 
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty")
+    if len(audio_bytes) > MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded audio file exceeds 10 MB")
 
     service = TranscribeService()
     text, job_name = service.transcribe_audio(

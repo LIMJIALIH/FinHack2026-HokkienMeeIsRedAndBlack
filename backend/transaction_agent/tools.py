@@ -131,9 +131,9 @@ def submit_llm_transfer_decision_tool(
     )
 
 
-def confirm_warning_tool(warning_id: str, confirmed: bool) -> dict[str, Any]:
+def confirm_warning_tool(warning_id: str, confirmed: bool, purpose: str | None = None) -> dict[str, Any]:
     """Approve or reject a WARNING/INTERVENTION transfer after user HITL decision."""
-    payload = {"warning_id": warning_id, "confirmed": confirmed}
+    payload = {"warning_id": warning_id, "confirmed": confirmed, "purpose": purpose}
     return _post_json_with_api_v1_fallback(
         "/transfer/warning/confirm",
         payload=payload,

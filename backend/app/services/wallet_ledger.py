@@ -1,17 +1,12 @@
 import json
-import logging
-import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
 from botocore.config import Config
-from botocore.exceptions import ClientError
 
 from app.core.config import Settings
 from app.services.aws_session import build_boto3_session
-
-_log = logging.getLogger(__name__)
 
 
 class WalletSettlementError(RuntimeError):
@@ -47,22 +42,11 @@ def _to_amount(value: float) -> Decimal:
 class WalletLedger:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or Settings()
-        self._table_name = os.getenv("DYNAMO_TABLE", "tng_guardian_users")
-        self._dynamo_table = self._build_dynamo_table()
-        self._dynamo_client = self._dynamo_table.meta.client
         self._neptune_client = self._build_neptune_client()
-
-    def _build_dynamo_table(self):
-        session = build_boto3_session(
-            region=self._settings.aws_region,
-            profile=self._settings.aws_profile or None,
-        )
-        resource = session.resource("dynamodb")
-        return resource.Table(self._table_name)
 
     def _build_neptune_client(self):
         if not self._settings.neptune_endpoint:
-            return None
+            raise WalletSettlementError("neptune_not_configured")
         session = build_boto3_session(
             region=self._settings.aws_region,
             profile=self._settings.aws_profile or None,
@@ -92,21 +76,60 @@ class WalletLedger:
                 deduped.append(value)
         return deduped
 
-    def _resolve_user_or_raise(self, raw_user_id: str) -> tuple[str, dict]:
-        for candidate in self._candidate_user_ids(raw_user_id):
-            response = self._dynamo_table.get_item(Key={"user_id": candidate})
-            item = response.get("Item")
-            if item:
-                return candidate, item
+    def _resolve_user_or_raise(self, raw_user_id: str) -> dict:
+        candidates = self._candidate_user_ids(raw_user_id)
+        response = self._neptune_client.execute_open_cypher_query(
+            openCypherQuery=(
+                "MATCH (u:User) "
+                "WHERE u.`~id` IN $candidates OR u.user_id IN $candidates "
+                "RETURN u.`~id` AS graph_id, u.user_id AS user_id, "
+                "u.name AS name, coalesce(u.balance, 0) AS balance "
+                "ORDER BY "
+                "CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END, "
+                "CASE WHEN u.user_id = $raw_user_id THEN 0 ELSE 1 END "
+                "LIMIT 1"
+            ),
+            parameters=json.dumps({"candidates": candidates, "raw_user_id": raw_user_id}),
+        )
+        rows = response.get("results", [])
+        if rows:
+            return rows[0]
         raise UserNotFoundError(raw_user_id)
 
-    def settle_transfer(self, sender_user_id: str, recipient_user_id: str, amount: float) -> WalletSettlementResult:
+    def _transfer_already_settled(self, transaction_id: str) -> bool:
+        if not transaction_id:
+            return False
+        response = self._neptune_client.execute_open_cypher_query(
+            openCypherQuery=(
+                "MATCH ()-[t:TRANSFERRED_TO {`~id`: $transaction_id}]->() "
+                "RETURN coalesce(t.wallet_settled, false) AS wallet_settled "
+                "LIMIT 1"
+            ),
+            parameters=json.dumps({"transaction_id": transaction_id}),
+        )
+        rows = response.get("results", [])
+        return bool(rows and rows[0].get("wallet_settled"))
+
+    def settle_transfer(
+        self,
+        sender_user_id: str,
+        recipient_user_id: str,
+        amount: float,
+        transaction_id: str | None = None,
+    ) -> WalletSettlementResult:
         if sender_user_id == recipient_user_id:
             raise WalletSettlementError("sender_and_recipient_must_differ")
 
+        tx_id = (transaction_id or "").strip()
         transfer_amount = _to_amount(amount)
-        sender_resolved_id, sender_item = self._resolve_user_or_raise(sender_user_id)
-        recipient_resolved_id, recipient_item = self._resolve_user_or_raise(recipient_user_id)
+        sender_item = self._resolve_user_or_raise(sender_user_id)
+        recipient_item = self._resolve_user_or_raise(recipient_user_id)
+
+        if tx_id and self._transfer_already_settled(tx_id):
+            return WalletSettlementResult(
+                sender_balance=float(_to_amount(float(sender_item.get("balance", 0)))),
+                recipient_balance=float(_to_amount(float(recipient_item.get("balance", 0)))),
+            )
 
         sender_balance = _to_amount(float(sender_item.get("balance", 0)))
         recipient_balance = _to_amount(float(recipient_item.get("balance", 0)))
@@ -117,83 +140,41 @@ class WalletLedger:
                 required_amount=float(transfer_amount),
             )
 
-        updated_at = str(int(time.time()))
-        amount_str = str(transfer_amount)
+        updated_at = int(time.time())
         sender_balance_after = sender_balance - transfer_amount
         recipient_balance_after = recipient_balance + transfer_amount
 
         try:
-            self._dynamo_client.transact_write_items(
-                TransactItems=[
+            self._neptune_client.execute_open_cypher_query(
+                openCypherQuery=(
+                    "MATCH (s:User {`~id`: $sender_graph_id}) "
+                    "MATCH (r:User {`~id`: $recipient_graph_id}) "
+                    "SET s.balance = $sender_balance_after, "
+                    "s.updated_at = $updated_at, "
+                    "r.balance = $recipient_balance_after, "
+                    "r.updated_at = $updated_at "
+                    "WITH s, r "
+                    "OPTIONAL MATCH ()-[t:TRANSFERRED_TO {`~id`: $transaction_id}]->() "
+                    "SET t.wallet_settled = CASE WHEN $transaction_id = '' THEN t.wallet_settled ELSE true END, "
+                    "t.sender_balance_after = CASE WHEN $transaction_id = '' THEN t.sender_balance_after ELSE $sender_balance_after END, "
+                    "t.recipient_balance_after = CASE WHEN $transaction_id = '' THEN t.recipient_balance_after ELSE $recipient_balance_after END "
+                    "RETURN s.balance AS sender_balance, r.balance AS recipient_balance"
+                ),
+                parameters=json.dumps(
                     {
-                        "Update": {
-                            "TableName": self._table_name,
-                            "Key": {"user_id": {"S": sender_resolved_id}},
-                            "UpdateExpression": "SET balance = balance - :amt, updated_at = :ts",
-                            "ConditionExpression": "attribute_exists(user_id) AND balance >= :amt",
-                            "ExpressionAttributeValues": {
-                                ":amt": {"N": amount_str},
-                                ":ts": {"S": updated_at},
-                            },
-                        }
-                    },
-                    {
-                        "Update": {
-                            "TableName": self._table_name,
-                            "Key": {"user_id": {"S": recipient_resolved_id}},
-                            "UpdateExpression": "SET balance = balance + :amt, updated_at = :ts",
-                            "ConditionExpression": "attribute_exists(user_id)",
-                            "ExpressionAttributeValues": {
-                                ":amt": {"N": amount_str},
-                                ":ts": {"S": updated_at},
-                            },
-                        }
-                    },
-                ]
+                        "sender_graph_id": sender_item["graph_id"],
+                        "recipient_graph_id": recipient_item["graph_id"],
+                        "transaction_id": tx_id,
+                        "sender_balance_after": float(sender_balance_after),
+                        "recipient_balance_after": float(recipient_balance_after),
+                        "updated_at": updated_at,
+                    }
+                ),
             )
-        except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code", "")
-            if code == "TransactionCanceledException":
-                # Re-check sender to provide a deterministic API error.
-                _, latest_sender = self._resolve_user_or_raise(sender_user_id)
-                latest_sender_balance = _to_amount(float(latest_sender.get("balance", 0)))
-                if latest_sender_balance < transfer_amount:
-                    raise InsufficientBalanceError(
-                        user_id=sender_user_id,
-                        current_balance=float(latest_sender_balance),
-                        required_amount=float(transfer_amount),
-                    ) from exc
-                raise WalletSettlementError("wallet_transaction_cancelled") from exc
-            raise WalletSettlementError(f"wallet_transaction_failed:{code}") from exc
-
-        self._sync_neptune_balance(sender_resolved_id, float(sender_balance_after))
-        self._sync_neptune_balance(recipient_resolved_id, float(recipient_balance_after))
+        except Exception as exc:  # noqa: BLE001
+            raise WalletSettlementError(f"neptune_wallet_update_failed:{exc}") from exc
 
         return WalletSettlementResult(
             sender_balance=float(sender_balance_after),
             recipient_balance=float(recipient_balance_after),
         )
-
-    def _sync_neptune_balance(self, user_id: str, balance: float) -> None:
-        if self._neptune_client is None:
-            return
-
-        query = (
-            "MATCH (u:User) "
-            "WHERE u.user_id = $uid OR u.`~id` = $graph_id "
-            "SET u.balance = $balance, u.updated_at = $updated_at "
-            "RETURN count(u) AS updated_count"
-        )
-        params = {
-            "uid": user_id,
-            "graph_id": user_id if user_id.startswith("user:") else f"user:{user_id}",
-            "balance": float(balance),
-            "updated_at": int(time.time()),
-        }
-        try:
-            self._neptune_client.execute_open_cypher_query(
-                openCypherQuery=query,
-                parameters=json.dumps(params),
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.error("Neptune balance sync failed for %s: %s", user_id, exc)

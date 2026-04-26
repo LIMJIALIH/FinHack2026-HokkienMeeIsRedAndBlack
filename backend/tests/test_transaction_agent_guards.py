@@ -7,10 +7,9 @@ is gated by LangGraph's ``interrupt_on`` middleware.
 import json
 
 from transaction_agent.agent import (
-    MainAgentRuntime,
     _build_review_card,
-    _extract_last_assistant_text,
     _extract_tool_args_from_interrupt,
+    execute_transfer,
 )
 from transaction_agent.graph_tools import search_contact_nodes_tool
 
@@ -100,6 +99,44 @@ def test_extract_tool_args_returns_none_for_unrelated_interrupt() -> None:
     assert result is None
 
 
+def test_execute_transfer_uses_single_confirmed_settlement(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_submit_llm_transfer_decision_tool(**kwargs):
+        captured.update(kwargs)
+        return {
+            "transaction_id": "tx_test",
+            "decision": "APPROVED",
+            "risk_score": kwargs["risk_score"],
+            "reason_codes": kwargs["reason_codes"],
+            "evidence_refs": kwargs["evidence_refs"],
+            "latency_ms": 0,
+            "warning_id": None,
+            "warning_delay_seconds": 0,
+            "sender_balance": 97.12,
+            "recipient_balance": 2.88,
+        }
+
+    monkeypatch.setattr(
+        "transaction_agent.agent.submit_llm_transfer_decision_tool",
+        fake_submit_llm_transfer_decision_tool,
+    )
+
+    result = json.loads(
+        execute_transfer(
+            sender_user_id="user:alice",
+            recipient_id="user:bob",
+            amount=2.88,
+            message="coffee",
+            risk_score=5,
+        )
+    )
+
+    assert captured["hitl_already_confirmed"] is True
+    assert result["warning_id"] is None
+    assert result["backend_status"] == "APPROVED"
+
+
 def test_neptune_contact_search_queries_name_and_id(monkeypatch) -> None:
     class StubSettings:
         neptune_endpoint = "dummy.neptune.amazonaws.com"
@@ -115,14 +152,11 @@ def test_neptune_contact_search_queries_name_and_id(monkeypatch) -> None:
             return {"results": [{"graph_id": "user:ali", "display_name": "Ali Bin Abu"}]}
 
     class FakeSession:
-        def __init__(self, *args, **kwargs):
-            pass
-
         def client(self, *args, **kwargs):
             return FakeClient()
 
     monkeypatch.setattr("transaction_agent.graph_tools.Settings", StubSettings)
-    monkeypatch.setattr("transaction_agent.graph_tools.boto3.Session", FakeSession)
+    monkeypatch.setattr("transaction_agent.graph_tools.build_boto3_session", lambda **kwargs: FakeSession())
 
     result = search_contact_nodes_tool("ali", limit=3)
 

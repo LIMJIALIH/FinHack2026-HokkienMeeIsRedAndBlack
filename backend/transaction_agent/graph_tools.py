@@ -26,6 +26,8 @@ USER_NODE_FIELDS = [
     "updated_at",
 ]
 
+USER_NODE_RETURNS = ", ".join([f"u.`{field}` AS `{field}`" for field in USER_NODE_FIELDS])
+
 TRANSFER_EDGE_FIELDS = [
     "~id",
     "tx_time",
@@ -109,6 +111,7 @@ def search_contact_nodes_tool(query: str, limit: int = 5) -> dict[str, Any]:
                 "WHERE toLower(coalesce(u.name, '')) CONTAINS toLower($q) "
                 "OR toLower(u.`~id`) CONTAINS toLower($q) "
                 "RETURN u.`~id` AS graph_id, u.name AS display_name "
+                "ORDER BY toLower(coalesce(u.name, u.`~id`)) "
                 "LIMIT $limit"
             )
             params = json.dumps({"q": q, "limit": max(1, int(limit))})
@@ -140,16 +143,25 @@ def get_user_node_info_tool(user_id: str) -> dict[str, Any]:
     if settings.neptune_endpoint:
         try:
             client = _neptune_data_client(settings)
-            returns = ", ".join([f"u.`{field}` AS `{field}`" for field in USER_NODE_FIELDS])
-            cypher = f"MATCH (u:User {{`~id`: $user_id}}) RETURN {returns} LIMIT 1"
+            candidates = _candidate_user_ids(user_id)
+            cypher = (
+                "MATCH (u:User) "
+                "WHERE u.`~id` IN $candidates OR u.user_id IN $candidates "
+                f"RETURN {USER_NODE_RETURNS} "
+                "ORDER BY "
+                "CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END, "
+                "CASE WHEN u.user_id = $raw_user_id THEN 0 ELSE 1 END "
+                "LIMIT 1"
+            )
             response = client.execute_open_cypher_query(
                 openCypherQuery=cypher,
-                parameters=json.dumps({"user_id": graph_id}),
+                parameters=json.dumps({"candidates": candidates, "raw_user_id": user_id}),
             )
             rows = response.get("results", [])
+            resolved_graph_id = str(rows[0].get("~id", graph_id)) if rows else graph_id
             return {
                 "user_id": user_id,
-                "graph_id": graph_id,
+                "graph_id": resolved_graph_id,
                 "schema": "(:User)",
                 "fields": USER_NODE_FIELDS,
                 "node": rows[0] if rows else None,
@@ -185,13 +197,13 @@ def get_transfer_edges_info_tool(
     """Fetch recent User-[:TRANSFERRED_TO]->User edges using the Neptune transaction edge schema."""
     _emit_progress("checking_transfer_edges", f"Reading TRANSFERRED_TO edges {source_user_id} -> {target_user_id}")
     settings = Settings()
-    source_graph_id = _to_graph_user_id(source_user_id)
-    target_graph_id = _to_graph_user_id(target_user_id)
     safe_limit = max(1, min(int(limit), 25))
 
     if settings.neptune_endpoint:
         try:
             client = _neptune_data_client(settings)
+            source_graph_id = _resolve_graph_user_id(client, source_user_id)
+            target_graph_id = _resolve_graph_user_id(client, target_user_id)
             returns = ", ".join([f"t.`{field}` AS `{field}`" for field in TRANSFER_EDGE_FIELDS])
             cypher = (
                 "MATCH (u:User {`~id`: $source_id})-[t:TRANSFERRED_TO]->(r:User {`~id`: $target_id}) "
@@ -304,6 +316,44 @@ def get_neptune_graph_overview_tool(user_limit: int = 5, edge_limit: int = 5) ->
 
 def _to_graph_user_id(user_id: str) -> str:
     return user_id if user_id.startswith("user:") else f"user:{user_id}"
+
+
+def _candidate_user_ids(raw_user_id: str) -> list[str]:
+    candidates: list[str] = []
+    if raw_user_id:
+        candidates.append(raw_user_id)
+        if raw_user_id.startswith("user:"):
+            stripped = raw_user_id[5:]
+            if stripped:
+                candidates.append(stripped)
+        else:
+            candidates.append(f"user:{raw_user_id}")
+
+    deduped: list[str] = []
+    for value in candidates:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _resolve_graph_user_id(client: Any, raw_user_id: str) -> str:
+    candidates = _candidate_user_ids(raw_user_id)
+    response = client.execute_open_cypher_query(
+        openCypherQuery=(
+            "MATCH (u:User) "
+            "WHERE u.`~id` IN $candidates OR u.user_id IN $candidates "
+            "RETURN u.`~id` AS graph_id "
+            "ORDER BY "
+            "CASE WHEN u.balance IS NULL THEN 1 ELSE 0 END, "
+            "CASE WHEN u.user_id = $raw_user_id THEN 0 ELSE 1 END "
+            "LIMIT 1"
+        ),
+        parameters=json.dumps({"candidates": candidates, "raw_user_id": raw_user_id}),
+    )
+    rows = response.get("results", [])
+    if rows and rows[0].get("graph_id"):
+        return str(rows[0]["graph_id"])
+    return _to_graph_user_id(raw_user_id)
 
 
 def _neptune_data_client(settings: Settings):

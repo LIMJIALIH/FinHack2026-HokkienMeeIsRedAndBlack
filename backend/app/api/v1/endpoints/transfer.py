@@ -33,9 +33,15 @@ def _persist_transfer_or_503(
     risk: RiskCheckResult,
     *,
     requires_hitl: bool | None = None,
+    status_override: str | None = None,
 ) -> str:
     try:
-        return risk_engine.persist_transfer(payload, risk, requires_hitl=requires_hitl)
+        return risk_engine.persist_transfer(
+            payload,
+            risk,
+            requires_hitl=requires_hitl,
+            status_override=status_override,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"transfer_graph_write_failed: {exc}") from exc
 
@@ -82,12 +88,14 @@ def _settle_wallet_or_4xx(
     sender_user_id: str,
     recipient_user_id: str,
     amount: float,
+    transaction_id: str | None = None,
 ) -> WalletSettlementResult:
     try:
         return wallet_ledger.settle_transfer(
             sender_user_id=sender_user_id,
             recipient_user_id=recipient_user_id,
             amount=amount,
+            transaction_id=transaction_id,
         )
     except UserNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -97,6 +105,48 @@ def _settle_wallet_or_4xx(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"wallet_settlement_failed: {exc}") from exc
+
+
+def _update_transfer_best_effort(
+    risk_engine: RiskEngine,
+    transaction_id: str,
+    status: str,
+) -> None:
+    try:
+        risk_engine.update_transfer_status(transaction_id, status)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _settle_persisted_transfer_or_4xx(
+    *,
+    risk_engine: RiskEngine,
+    wallet_ledger: WalletLedger,
+    transaction_id: str,
+    sender_user_id: str,
+    recipient_user_id: str,
+    amount: float,
+) -> WalletSettlementResult:
+    try:
+        settlement = _settle_wallet_or_4xx(
+            wallet_ledger=wallet_ledger,
+            sender_user_id=sender_user_id,
+            recipient_user_id=recipient_user_id,
+            amount=amount,
+            transaction_id=transaction_id,
+        )
+    except HTTPException:
+        _update_transfer_best_effort(risk_engine, transaction_id, "settlement_failed")
+        raise
+
+    updated = _update_transfer_or_503(
+        risk_engine=risk_engine,
+        transaction_id=transaction_id,
+        status="approved",
+    )
+    if not updated:
+        raise HTTPException(status_code=503, detail="transfer_graph_update_missing_after_settlement")
+    return settlement
 
 
 @router.post("/transfer/llm-decision", response_model=TransferEvaluateResponse)
@@ -118,25 +168,26 @@ def transfer_llm_decision(
     )
     transaction_payload = TransferEvaluateRequest.model_validate(payload.model_dump())
     requires_hitl = not payload.hitl_already_confirmed
-    settlement: WalletSettlementResult | None = None
-
-    if not requires_hitl:
-        settlement = _settle_wallet_or_4xx(
-            wallet_ledger=wallet_ledger,
-            sender_user_id=transaction_payload.user_id,
-            recipient_user_id=transaction_payload.recipient_id,
-            amount=transaction_payload.amount,
-        )
 
     transaction_id = _persist_transfer_or_503(
         risk_engine=risk_engine,
         payload=transaction_payload,
         risk=risk,
         requires_hitl=requires_hitl,
+        status_override="pending_hitl" if requires_hitl else "settlement_pending",
     )
 
     if not requires_hitl:
+        settlement = _settle_persisted_transfer_or_4xx(
+            risk_engine=risk_engine,
+            wallet_ledger=wallet_ledger,
+            transaction_id=transaction_id,
+            sender_user_id=transaction_payload.user_id,
+            recipient_user_id=transaction_payload.recipient_id,
+            amount=transaction_payload.amount,
+        )
         return TransferEvaluateResponse(
+            transaction_id=transaction_id,
             decision=risk.decision,
             risk_score=risk.risk_score,
             reason_codes=risk.reason_codes,
@@ -144,8 +195,8 @@ def transfer_llm_decision(
             latency_ms=risk.latency_ms,
             warning_id=None,
             warning_delay_seconds=0,
-            sender_balance=settlement.sender_balance if settlement else None,
-            recipient_balance=settlement.recipient_balance if settlement else None,
+            sender_balance=settlement.sender_balance,
+            recipient_balance=settlement.recipient_balance,
         )
 
     default_warning_delay_seconds = int(request.app.state.warning_delay_seconds)
@@ -166,6 +217,7 @@ def transfer_llm_decision(
     warning_store.put(warning_state)
 
     return TransferEvaluateResponse(
+        transaction_id=transaction_id,
         decision=risk.decision,
         risk_score=risk.risk_score,
         reason_codes=risk.reason_codes,
@@ -195,21 +247,25 @@ def transfer_evaluate(
         raise HTTPException(status_code=502, detail="invalid_risk_graph_result")
 
     requires_hitl = risk.decision != "APPROVED"
-    settlement: WalletSettlementResult | None = None
-    if not requires_hitl:
-        settlement = _settle_wallet_or_4xx(
-            wallet_ledger=wallet_ledger,
-            sender_user_id=payload.user_id,
-            recipient_user_id=payload.recipient_id,
-            amount=payload.amount,
-        )
 
     transaction_id = _persist_transfer_or_503(
         risk_engine=risk_engine,
         payload=payload,
         risk=risk,
         requires_hitl=requires_hitl,
+        status_override="pending_hitl" if requires_hitl else "settlement_pending",
     )
+
+    settlement: WalletSettlementResult | None = None
+    if not requires_hitl:
+        settlement = _settle_persisted_transfer_or_4xx(
+            risk_engine=risk_engine,
+            wallet_ledger=wallet_ledger,
+            transaction_id=transaction_id,
+            sender_user_id=payload.user_id,
+            recipient_user_id=payload.recipient_id,
+            amount=payload.amount,
+        )
 
     warning_state: WarningState | None = None
     warning_delay_seconds: int | None = None
@@ -225,6 +281,7 @@ def transfer_evaluate(
         warning_store.put(warning_state)
 
     return TransferEvaluateResponse(
+        transaction_id=transaction_id,
         decision=risk.decision,
         risk_score=risk.risk_score,
         reason_codes=risk.reason_codes,
@@ -255,6 +312,10 @@ def warning_confirm(
         return WarningConfirmResponse(status="APPROVED_AFTER_WARNING")
     if warning.state == "cancelled":
         return WarningConfirmResponse(status="CANCELLED")
+    if warning.state == "settling":
+        raise HTTPException(status_code=409, detail="warning_settlement_in_progress")
+    if warning.state == "failed":
+        raise HTTPException(status_code=409, detail="warning_settlement_failed")
 
     if not payload.confirmed:
         cancelled_now = warning_store.cancel(payload.warning_id)
@@ -262,28 +323,47 @@ def warning_confirm(
             _update_transfer_or_503(
                 risk_engine=risk_engine,
                 transaction_id=warning.transaction_id,
-                status="reversed",
+                status="cancelled",
             )
         return WarningConfirmResponse(status="CANCELLED")
 
-    approved, wait_left, already_approved = warning_store.approve_if_delay_passed(payload.warning_id, time.time())
+    approved, wait_left, already_approved = warning_store.approval_status(payload.warning_id, time.time())
     if already_approved:
         return WarningConfirmResponse(status="APPROVED_AFTER_WARNING")
     if not approved:
         return WarningConfirmResponse(status="PENDING_DELAY", wait_seconds_remaining=wait_left)
 
-    _settle_wallet_or_4xx(
-        wallet_ledger=wallet_ledger,
-        sender_user_id=warning.user_id,
-        recipient_user_id=warning.recipient_id,
-        amount=warning.amount,
-    )
+    if not warning_store.begin_settlement(payload.warning_id):
+        raise HTTPException(status_code=409, detail="warning_state_changed")
 
-    updated = _update_transfer_or_503(
-        risk_engine=risk_engine,
-        transaction_id=warning.transaction_id,
-        status="approved",
-    )
+    try:
+        settlement = _settle_wallet_or_4xx(
+            wallet_ledger=wallet_ledger,
+            sender_user_id=warning.user_id,
+            recipient_user_id=warning.recipient_id,
+            amount=warning.amount,
+            transaction_id=warning.transaction_id,
+        )
+    except HTTPException:
+        warning_store.reset_to_pending(payload.warning_id)
+        raise
+
+    try:
+        updated = _update_transfer_or_503(
+            risk_engine=risk_engine,
+            transaction_id=warning.transaction_id,
+            status="approved",
+        )
+    except HTTPException:
+        warning_store.mark_failed(payload.warning_id)
+        raise
     if not updated:
-        raise HTTPException(status_code=404, detail="transaction_id not found in graph")
-    return WarningConfirmResponse(status="APPROVED_AFTER_WARNING")
+        warning_store.mark_failed(payload.warning_id)
+        raise HTTPException(status_code=503, detail="transfer_graph_update_missing_after_settlement")
+
+    warning_store.mark_approved(payload.warning_id, purpose=payload.purpose)
+    return WarningConfirmResponse(
+        status="APPROVED_AFTER_WARNING",
+        sender_balance=settlement.sender_balance,
+        recipient_balance=settlement.recipient_balance,
+    )

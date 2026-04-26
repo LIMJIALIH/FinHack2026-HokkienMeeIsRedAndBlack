@@ -12,6 +12,8 @@ type TransferReviewCard = {
   reason_codes: string[]
   evidence_refs: string[]
   purpose_question: string
+  warning_id?: string | null
+  warning_delay_seconds?: number | null
   amount?: number
   currency?: string
   recipient_name?: string
@@ -28,7 +30,10 @@ type ScamInterventionCardProps = {
 
 type RiskLevel = "safe" | "caution" | "danger"
 
-function getRiskLevel(score: number): RiskLevel {
+function getRiskLevel(card: TransferReviewCard): RiskLevel {
+  if (card.decision_preview === "INTERVENTION_REQUIRED") return "danger"
+  if (card.decision_preview === "WARNING") return "caution"
+  const score = card.risk_score ?? 0
   if (score >= 70) return "danger"
   if (score >= 40) return "caution"
   return "safe"
@@ -113,7 +118,7 @@ export function ScamInterventionCard({
   onCancel,
   onProceed,
 }: ScamInterventionCardProps) {
-  const risk = getRiskLevel(card.risk_score ?? 0)
+  const risk = getRiskLevel(card)
   const cfg = RISK_CONFIG[risk]
   const reasons = card.reason_codes.length ? card.reason_codes : []
   const amount = card.amount ?? 0
@@ -147,6 +152,12 @@ export function ScamInterventionCard({
         {assistantText && (
           <div className="mt-4 rounded-lg border border-border bg-secondary/50 px-3 py-2.5">
             <p className="text-sm leading-relaxed text-foreground">{assistantText}</p>
+          </div>
+        )}
+
+        {card.warning_delay_seconds !== null && card.warning_delay_seconds !== undefined && card.warning_delay_seconds > 0 && (
+          <div className="mt-4 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Wait {card.warning_delay_seconds} seconds, then confirm again to send.
           </div>
         )}
 
